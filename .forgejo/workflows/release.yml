@@ -1,0 +1,35 @@
+# The release pipeline, on Codeberg: for every v* tag, test, build everything a release ships
+# (packaging/release.sh) and publish it as the Codeberg release. The GitHub mirror copies the
+# release afterwards (.github/workflows/release.yml); nothing here depends on GitHub.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: codeberg-medium
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0 # the release notes list the commits since the previous tag
+      - name: Install Go, nFPM and NSIS
+        run: |
+          sudo=$(command -v sudo || true)
+          go_version=$(sed -n 's/^go //p' go.mod)
+          mkdir -p "$HOME/sdk" # not ~/go: that's GOPATH, where go install puts nfpm
+          curl -fsSL "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz" | tar -xz -C "$HOME/sdk"
+          printf '%s\n' "$HOME/sdk/go/bin" "$HOME/go/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/sdk/go/bin:$HOME/go/bin:$PATH"
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          $sudo apt-get update -qq
+          $sudo apt-get install -y -qq nsis zip jq >/dev/null
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: packaging/release.sh "${{ github.ref_name }}"
+      - name: Publish
+        run: packaging/publish-codeberg.sh "${{ github.ref_name }}"
+        env:
+          CODEBERG_TOKEN: ${{ secrets.GITHUB_TOKEN }}

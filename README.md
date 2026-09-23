@@ -22,39 +22,41 @@ pull requests on Codeberg.
 
 ## Install
 
-**Installers:** download from the [latest release](https://github.com/Bertus-W/clickup-tui/releases/latest):
+**Installers:** download from the [latest release](https://codeberg.org/b-wisman/clickup-tui/releases/latest):
 
 | System | File | |
 |---|---|---|
 | macOS | `cu_<version>_macos.pkg` | Intel and Apple Silicon; installs `/usr/local/bin/cu` |
-| Windows | `cu_<version>_windows_amd64.msi` (or `_arm64`) | for your user only, no admin needed; puts `cu` on your PATH; uninstall from Settings → Apps |
+| Windows | `cu_<version>_windows_setup.exe` | x64 and ARM64; for your user only, no admin needed; puts `cu` on your PATH; uninstall from Settings → Apps |
 | Debian, Ubuntu | `clickup-tui_<version>_amd64.deb` (or `_arm64`) | `sudo apt install ./clickup-tui_*.deb` |
 | Fedora, RHEL | `clickup-tui-<version>-1.x86_64.rpm` (or `aarch64`) | `sudo dnf install ./clickup-tui-*.rpm` |
 | Alpine | `clickup-tui_<version>_x86_64.apk` | `sudo apk add --allow-untrusted ./clickup-tui_*.apk` |
 | Arch | `clickup-tui-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./clickup-tui-*.pkg.tar.zst` |
 
-The macOS package isn't signed with an Apple Developer ID, so the first time macOS refuses to open
-it: right-click it and choose **Open**, or allow it in System Settings → Privacy & Security. The
-Linux packages are called `clickup-tui` because Debian's `cu` is an unrelated serial-line tool;
+The installers aren't signed (that takes a paid Apple Developer ID and a Windows code signing
+certificate). The first time, macOS refuses to open the `.pkg`: right-click it and choose
+**Open**, or allow it in System Settings → Privacy & Security. Windows may show "Windows protected
+your PC": choose **More info** → **Run anyway**. The Linux packages are called `clickup-tui` because Debian's `cu` is an unrelated serial-line tool;
 the command is still `cu`.
 
 **Install script, macOS and Linux:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.sh | sh
+curl -fsSL https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/install.sh | sh
 ```
 
 **Install script, Windows** (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.ps1 | iex
+irm https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/install.ps1 | iex
 ```
 
 Both install the latest release and check its checksum; `cu version` shows what you have.
 `install.sh` puts `cu` in `/usr/local/bin` when it can, else `~/.local/bin`
 (`CU_INSTALL_DIR` picks another place); `install.ps1` uses `%LocalAppData%\Programs\cu` and adds
 it to your PATH. `CU_VERSION=v0.1.0` installs a specific release. Or download an archive from the
-[releases](https://github.com/Bertus-W/clickup-tui/releases) yourself.
+[releases](https://codeberg.org/b-wisman/clickup-tui/releases) yourself; every file is listed with
+its SHA-256 in `checksums.txt`.
 
 **With Go** (1.26 or newer):
 
@@ -224,14 +226,28 @@ option in a popup to pick it.
 
 ## Releases
 
-Tag a version on Codeberg and push the tag: `git tag v0.1.0 && git push origin v0.1.0`. The
-mirror carries it to GitHub, where a workflow builds `cu` for macOS, Linux and Windows (amd64
-and arm64) with [GoReleaser](https://goreleaser.com), publishes the release, and then installs it
-with both install scripts on each system to check them. The installers workflow then builds the
-macOS `.pkg` and Windows `.msi`, installs each on a real machine (and uninstalls the `.msi`
-again), installs the `.deb`, `.rpm` and `.apk` on Ubuntu, Fedora and Alpine, and attaches the
-installers to the release. It can also be run by hand for an existing tag. `goreleaser release --snapshot --clean`
-builds the same archives locally, in `dist/`.
+Releases are made on Codeberg. Tag a version and push the tag:
+
+```sh
+git tag -a v0.2.0 -m "cu v0.2.0" && git push origin v0.2.0
+```
+
+Codeberg's CI (`.forgejo/workflows/release.yml`) runs the tests, builds everything with
+`packaging/release.sh` and publishes the Codeberg release. The script runs on Linux or macOS and
+needs Go, [nFPM](https://nfpm.goreleaser.com) and NSIS (`makensis`); `packaging/release.sh v0.0.0`
+builds a release into `dist/` locally. It makes:
+
+- `cu` for macOS, Linux and Windows on amd64 and arm64, as archives
+- the Linux packages, with nFPM (`packaging/linux`)
+- the macOS `.pkg`, with two small Go tools that stand in for Apple's `lipo` and `pkgbuild`
+  (`packaging/macos`), so it can be built on Linux
+- the Windows `setup.exe`, with NSIS (`packaging/windows`)
+- `checksums.txt` over all of them
+
+The GitHub mirror then copies the release (`.github/workflows/release.yml`): it waits for the
+Codeberg release, checks the checksums, publishes the same files and notes on GitHub, and installs
+the release with every installer on real macOS, Windows and Linux machines, which Codeberg's CI
+doesn't have. GitHub is optional: without it, the Codeberg release is complete.
 
 ## Code
 
@@ -258,3 +274,7 @@ internal/seed     the demo project
 go test -race ./...
 go run ./cmd/cu demo
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).

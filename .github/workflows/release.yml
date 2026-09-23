@@ -1,56 +1,126 @@
-# Publishes a GitHub release with binaries for every platform when a v* tag arrives
-# (pushed here by the Codeberg mirror). See .goreleaser.yaml.
+# The GitHub copy of each release. Releases are built and published on Codeberg
+# (.forgejo/workflows/release.yml). When a tag arrives here through the mirror, this waits for
+# the Codeberg release, copies it (same files, same notes), then installs it with every
+# installer on real macOS, Windows and Linux machines, which Codeberg doesn't have.
+# Run it by hand to copy (and test) an existing release again.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag: { description: "Release tag, e.g. v0.2.0", required: true }
 
 permissions:
-  contents: write # create the release and upload its files
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  CODEBERG_API: https://codeberg.org/api/v1/repos/b-wisman/clickup-tui
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
 
 jobs:
-  release:
+  copy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the Codeberg release
+        run: |
+          for _ in $(seq 90); do # 30 minutes
+            if curl -fsS "$CODEBERG_API/releases/tags/$TAG" -o release.json 2>/dev/null &&
+              [ "$(jq -r .draft release.json)" = false ]; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Codeberg has no published release for $TAG after 30 minutes"
+          exit 1
+      - name: Download it and check the checksums
+        run: |
+          mkdir dl
+          jq -r '.assets[].browser_download_url' release.json | while read -r url; do
+            curl -fsSL -o "dl/${url##*/}" "$url"
+          done
+          (cd dl && sha256sum --check --strict checksums.txt)
+      - name: Publish it here
+        run: |
+          jq -r .body release.json > notes.md
+          printf '\n\n_A copy of the [Codeberg release](https://codeberg.org/b-wisman/clickup-tui/releases/tag/%s), where development happens._\n' "$TAG" >> notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dl/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            pre=""
+            [ "$(jq -r .prerelease release.json)" = true ] && pre=--prerelease
+            gh release create "$TAG" dl/* --title "$TAG" --notes-file notes.md $pre
+          fi
+
+  test-macos:
+    needs: copy
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The .pkg
+        run: |
+          gh release download "$TAG" -p "*_macos.pkg"
+          sudo installer -pkg ./*_macos.pkg -target /
+          /usr/local/bin/cu version | grep -F "$TAG"
+          lipo -archs /usr/local/bin/cu | grep -q "x86_64 arm64"
+          pkgutil --pkg-info org.codeberg.b-wisman.clickup-tui
+      - name: install.sh
+        run: |
+          CU_VERSION="$TAG" CU_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/cu" version | grep -F "$TAG"
+
+  test-windows:
+    needs: copy
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: setup.exe, then its uninstaller
+        run: |
+          gh release download $env:TAG -p "*_windows_setup.exe"
+          $setup = (Resolve-Path *_windows_setup.exe).Path
+          Start-Process $setup -ArgumentList /S -Wait
+          $dir = "$env:LOCALAPPDATA\Programs\cu"
+          $out = & "$dir\cu.exe" version
+          if ($out -notlike "*$env:TAG*") { throw "installed: $out" }
+          $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if ($path -notlike "*$dir*") { throw "not on the user PATH: $path" }
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\clickup-tui'
+          if (-not (Test-Path $key)) { throw "no entry in Settings > Apps" }
+
+          Start-Process "$dir\uninstall.exe" -ArgumentList /S -Wait
+          for ($i = 0; (Test-Path "$dir\cu.exe") -and $i -lt 60; $i++) { Start-Sleep 1 } # it runs from a copy
+          if (Test-Path "$dir\cu.exe") { throw "cu.exe is still there after uninstalling" }
+          $path = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if ($path -like "*$dir*") { throw "uninstalling left cu on the PATH: $path" }
+          if (Test-Path $key) { throw "uninstalling left the Settings > Apps entry" }
+      - name: install.ps1
+        run: |
+          $env:CU_VERSION = $env:TAG
+          ./install.ps1
+          $out = & "$env:LOCALAPPDATA\Programs\cu\cu.exe" version
+          if ($out -notlike "*$env:TAG*") { throw "installed: $out" }
+
+  test-linux:
+    needs: copy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # the changelog needs the history
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: "~> v2"
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Installs the release just published with the install scripts, on each system.
-  install:
-    needs: release
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      CU_VERSION: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@v4
-      - if: runner.os != 'Windows'
+      - name: The .deb, .rpm, .apk and Arch packages
         run: |
-          CU_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
-          "$RUNNER_TEMP/bin/cu" version | grep -F "$CU_VERSION"
-      - if: runner.os == 'Windows'
-        shell: pwsh
+          gh release download "$TAG" -p "*.deb" -p "*.rpm" -p "*.apk" -p "*.pkg.tar.zst" -D dl
+          sudo apt-get install -y ./dl/*_amd64.deb
+          cu version | grep -F "$TAG"
+          docker run --rm -v "$PWD/dl:/dl" fedora:latest sh -c 'dnf install -y /dl/*.x86_64.rpm >/dev/null && cu version' | grep -F "$TAG"
+          docker run --rm -v "$PWD/dl:/dl" alpine:latest sh -c 'apk add --allow-untrusted /dl/*_x86_64.apk >/dev/null && cu version' | grep -F "$TAG"
+          docker run --rm -v "$PWD/dl:/dl" archlinux:latest sh -c 'pacman -U --noconfirm /dl/*-x86_64.pkg.tar.zst >/dev/null && cu version' | grep -F "$TAG"
+      - name: install.sh
         run: |
-          ./install.ps1
-          $out = & "$env:LOCALAPPDATA\Programs\cu\cu.exe" version
-          if ($out -notlike "*$env:CU_VERSION*") { throw "installed: $out" }
-
-  # The macOS .pkg and Windows .msi, built from the archives above and attached to the release.
-  installers:
-    needs: release
-    uses: ./.github/workflows/installers.yml
-    with:
-      tag: ${{ github.ref_name }}
+          CU_VERSION="$TAG" CU_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/cu" version | grep -F "$TAG"

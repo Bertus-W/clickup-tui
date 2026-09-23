@@ -1,11 +1,14 @@
-# Installs cu, the ClickUp terminal UI, from the latest GitHub release (Windows):
+# Installs cu, the ClickUp terminal UI, from the latest Codeberg release (Windows):
 #
-#   irm https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.ps1 | iex
+#   irm https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/install.ps1 | iex
+#
+# (The installer, cu_<version>_windows_setup.exe on the releases page, does the same with a
+# wizard, and adds an uninstaller.)
 #
 # $env:CU_VERSION = "v0.1.0" picks a release. cu goes to %LocalAppData%\Programs\cu, which is
 # added to your user PATH. The download is checked against the release's checksums.
 $ErrorActionPreference = "Stop"
-$repo = "Bertus-W/clickup-tui"
+$repo = "b-wisman/clickup-tui"
 
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { "amd64" }
@@ -15,11 +18,11 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
 
 $tag = $env:CU_VERSION
 if (-not $tag) {
-    $tag = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").tag_name
+    $tag = (Invoke-RestMethod "https://codeberg.org/api/v1/repos/$repo/releases/latest").tag_name
 }
 
 $archive = "cu_$($tag.TrimStart('v'))_windows_$arch.zip"
-$base = "https://github.com/$repo/releases/download/$tag"
+$base = "https://codeberg.org/$repo/releases/download/$tag"
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())
 New-Item -ItemType Directory $tmp | Out-Null
 try {
@@ -40,9 +43,14 @@ try {
     Remove-Item -Recurse -Force $tmp
 }
 
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+# The registry value itself, so %VARIABLES% in PATH stay as they are.
+$userPath = (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
 if (($userPath -split ";") -notcontains $dir) {
-    [Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User")
+    $parts = @($userPath -split ";" | Where-Object { $_ }) + $dir
+    Set-ItemProperty 'HKCU:\Environment' -Name Path -Value ($parts -join ";") -Type ExpandString
+    # Tell running programs (Explorer, new terminals) that the environment changed.
+    [Environment]::SetEnvironmentVariable("CU_INSTALLER_REFRESH", "1", "User")
+    [Environment]::SetEnvironmentVariable("CU_INSTALLER_REFRESH", $null, "User")
     $env:Path += ";$dir"
     Write-Host "Added $dir to your PATH (new terminals pick it up)."
 }

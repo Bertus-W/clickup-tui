@@ -1,14 +1,14 @@
 #!/bin/sh
-# Installs cu, the ClickUp terminal UI, from the latest GitHub release (macOS and Linux):
+# Installs cu, the ClickUp terminal UI, from the latest Codeberg release (macOS and Linux):
 #
-#   curl -fsSL https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.sh | sh
+#   curl -fsSL https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/install.sh | sh
 #
 # CU_VERSION=v0.1.0 picks a release; CU_INSTALL_DIR picks where cu goes (default: /usr/local/bin
 # when writable, else ~/.local/bin); CU_DOWNLOAD_URL serves the release files from elsewhere.
 # The download is checked against the release's checksums.
 set -eu
 
-repo="Bertus-W/clickup-tui"
+repo="b-wisman/clickup-tui"
 
 fail() { echo "install.sh: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "needs $1"; }
@@ -28,14 +28,13 @@ esac
 
 tag="${CU_VERSION:-}"
 if [ -z "$tag" ]; then
-  # The latest release page redirects to .../releases/tag/vX.Y.Z; no API rate limit involved.
-  tag="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")"
-  tag="${tag##*/}"
-  case "$tag" in v*) ;; *) fail "no release found yet" ;; esac
+  tag="$(curl -fsSL "https://codeberg.org/api/v1/repos/$repo/releases/latest" 2>/dev/null |
+    sed -n 's/.*"tag_name":"\([^"]*\)".*/\1/p')" || true
+  case "$tag" in v*) ;; *) fail "couldn't find the latest release" ;; esac
 fi
 
 archive="cu_${tag#v}_${os}_${arch}.tar.gz"
-base="${CU_DOWNLOAD_URL:-https://github.com/$repo/releases/download/$tag}"
+base="${CU_DOWNLOAD_URL:-https://codeberg.org/$repo/releases/download/$tag}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
