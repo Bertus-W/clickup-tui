@@ -10,6 +10,12 @@ background (stale-while-revalidate). Edits are optimistic: the UI updates immedi
 back if ClickUp rejects the change. The workspace tree loads concurrently, scrolling through
 tasks only fetches the one you stop on, and filtering happens in memory.
 
+> **Made with AI.** This tool was vibecoded: written almost entirely by an AI coding assistant,
+> with a human steering, testing and deciding what it should do. It exists because ClickUp's web
+> and desktop apps are slow: waiting dozens of seconds for a task to show up is normal there, and
+> ClickUp's developers haven't put in the effort to fix that. So we built our own fast client on
+> their public API instead.
+
 ## Install
 
 Needs Go 1.26 or newer.
