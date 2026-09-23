@@ -4,6 +4,7 @@
 //	cu setup        ask for the API token and workspace again
 //	cu demo         try it offline against a built-in demo project
 //	cu seed         create the demo project in your workspace (idempotent)
+//	cu version      print the version
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 
 	"golang.org/x/term"
 
@@ -25,6 +27,20 @@ import (
 	"codeberg.org/b-wisman/clickup-tui/internal/seed"
 	"codeberg.org/b-wisman/clickup-tui/internal/setup"
 )
+
+// version is set by release builds (-ldflags "-X main.version=…"); go install builds get
+// it from the module version instead.
+var version = ""
+
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -65,7 +81,10 @@ func run(args []string) error {
 	case "seed":
 		return runSeed(args)
 	case "-h", "--help", "help":
-		fmt.Println("usage: cu [setup | demo | seed [-space NAME] [-list NAME]]")
+		fmt.Println("usage: cu [setup | demo | seed [-space NAME] [-list NAME] | version]")
+		return nil
+	case "-v", "--version", "version":
+		fmt.Println("cu", versionString())
 		return nil
 	}
 	return fmt.Errorf("unknown command %q (try cu help)", cmd)

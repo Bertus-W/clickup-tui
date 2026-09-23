@@ -1,0 +1,42 @@
+# Release builds: `git tag v0.1.0 && git push origin v0.1.0` on Codeberg; the mirror pushes the
+# tag to GitHub, where .github/workflows/release.yml runs GoReleaser and publishes the release.
+# Try it locally with: goreleaser release --snapshot --clean
+version: 2
+
+project_name: cu
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - main: ./cmd/cu
+    binary: cu
+    env:
+      - CGO_ENABLED=0 # the SQLite driver is pure Go, so every target cross-compiles
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Tag }}"]
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # cu_0.1.0_darwin_arm64.tar.gz: the install scripts build these names.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [README.md]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+
+release:
+  footer: |
+    Install: `curl -fsSL https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.sh | sh`
+    (Windows: `irm https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.ps1 | iex`).
+    Development happens on [Codeberg](https://codeberg.org/b-wisman/clickup-tui); this is a read-only mirror.

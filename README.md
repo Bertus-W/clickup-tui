@@ -22,7 +22,25 @@ pull requests on Codeberg.
 
 ## Install
 
-Needs Go 1.26 or newer.
+**macOS and Linux:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.sh | sh
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.ps1 | iex
+```
+
+Both install the latest release and check its checksum; `cu version` shows what you have.
+`install.sh` puts `cu` in `/usr/local/bin` when it can, else `~/.local/bin`
+(`CU_INSTALL_DIR` picks another place); `install.ps1` uses `%LocalAppData%\Programs\cu` and adds
+it to your PATH. `CU_VERSION=v0.1.0` installs a specific release. Or download an archive from the
+[releases](https://github.com/Bertus-W/clickup-tui/releases) yourself.
+
+**With Go** (1.26 or newer):
 
 ```sh
 go install codeberg.org/b-wisman/clickup-tui/cmd/cu@latest
@@ -64,6 +82,7 @@ Works on macOS, Linux and Windows (Windows Terminal recommended). `e` and `C` op
 cu        # open the TUI (asks for your token the first time)
 cu setup  # enter the token and workspace again
 cu demo   # try it offline, against a built-in demo project
+cu version
 cu seed   # create the demo project in your workspace: a list with coloured
           # Scope/Severity fields and 12 tasks. Safe to re-run.
           # Options: -space "Team Space" -list "clickup-tui demo"
@@ -187,6 +206,14 @@ Click a page tab to switch pages, a panel to focus it and a row to select it; do
 cell to add time to it. Click the `List` / `Mine` tab to switch, scroll with the wheel, and click an
 option in a popup to pick it.
 
+## Releases
+
+Tag a version on Codeberg and push the tag: `git tag v0.1.0 && git push origin v0.1.0`. The
+mirror carries it to GitHub, where a workflow builds `cu` for macOS, Linux and Windows (amd64
+and arm64) with [GoReleaser](https://goreleaser.com), publishes the release, and then installs it
+with both install scripts on each system to check them. `goreleaser release --snapshot --clean`
+builds the same archives locally, in `dist/`.
+
 ## Code
 
 `go test ./...` runs everything against an in-memory fake ClickUp. `CU_LIVE=1 go test -run Live
@@ -194,7 +221,7 @@ option in a popup to pick it.
 throwaway task it deletes afterwards.
 
 ```
-cmd/cu            entry point: cu, cu demo, cu seed
+cmd/cu            entry point: cu, cu setup, cu demo, cu seed, cu version
 internal/clickup  API client: typed errors, retries honouring rate limits, page iterators
 internal/cache    generic SQLite cache; stale-while-revalidate as an iterator
 internal/app      state and actions, independent of the terminal; tested with a scripted UI

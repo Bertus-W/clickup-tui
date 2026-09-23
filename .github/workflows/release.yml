@@ -1,0 +1,49 @@
+# Publishes a GitHub release with binaries for every platform when a v* tag arrives
+# (pushed here by the Codeberg mirror). See .goreleaser.yaml.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload its files
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the changelog needs the history
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Installs the release just published with the install scripts, on each system.
+  install:
+    needs: release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CU_VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os != 'Windows'
+        run: |
+          CU_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/cu" version | grep -F "$CU_VERSION"
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./install.ps1
+          $out = & "$env:LOCALAPPDATA\Programs\cu\cu.exe" version
+          if ($out -notlike "*$env:CU_VERSION*") { throw "installed: $out" }
