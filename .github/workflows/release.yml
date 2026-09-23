@@ -47,3 +47,10 @@ jobs:
           ./install.ps1
           $out = & "$env:LOCALAPPDATA\Programs\cu\cu.exe" version
           if ($out -notlike "*$env:CU_VERSION*") { throw "installed: $out" }
+
+  # The macOS .pkg and Windows .msi, built from the archives above and attached to the release.
+  installers:
+    needs: release
+    uses: ./.github/workflows/installers.yml
+    with:
+      tag: ${{ github.ref_name }}

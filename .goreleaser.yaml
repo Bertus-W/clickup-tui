@@ -29,6 +29,19 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files: [README.md]
 
+# Linux packages. The package is clickup-tui: Debian's "cu" is the uucp serial tool, which also
+# installs /usr/bin/cu, so the two can't be installed together.
+nfpms:
+  - package_name: clickup-tui
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats: [deb, rpm, apk, archlinux]
+    bindir: /usr/bin
+    vendor: Bertus
+    maintainer: Bertus <https://codeberg.org/b-wisman>
+    homepage: https://codeberg.org/b-wisman/clickup-tui
+    description: A fast, lazygit-style terminal UI for ClickUp.
+    conflicts: [cu]
+
 checksum:
   name_template: checksums.txt
 
