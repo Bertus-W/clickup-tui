@@ -16,6 +16,10 @@ tasks only fetches the one you stop on, and filtering happens in memory.
 > ClickUp's developers haven't put in the effort to fix that. So we built our own fast client on
 > their public API instead.
 
+Development happens on [Codeberg](https://codeberg.org/b-wisman/clickup-tui).
+[GitHub](https://github.com/Bertus-W/clickup-tui) is a read-only mirror: please open issues and
+pull requests on Codeberg.
+
 ## Install
 
 Needs Go 1.26 or newer.
