@@ -20,8 +20,9 @@
     </StandardDirectory>
 
     <Feature Id="Main">
-      <!-- Files in the user profile need a registry value as their key path. -->
-      <Component Directory="INSTALLFOLDER">
+      <!-- Files in the user profile need a registry value as their key path, and then the
+           component needs a fixed Guid. -->
+      <Component Directory="INSTALLFOLDER" Guid="C0F31676-189C-4E9F-BA07-4E7D36AC91F9">
         <File Source="$(var.Exe)" Name="cu.exe" />
         <RegistryValue Root="HKCU" Key="Software\clickup-tui" Name="installed" Type="integer" Value="1" KeyPath="yes" />
         <Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="no" Permanent="no" />
