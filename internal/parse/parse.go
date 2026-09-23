@@ -11,10 +11,14 @@ import (
 
 // TaskRef accepts a task id, custom id or app.clickup.com/t/... URL.
 func TaskRef(ref string) string {
-	ref = strings.TrimRight(strings.TrimSpace(ref), "/")
+	ref = strings.TrimSpace(ref)
 	if _, after, ok := strings.Cut(ref, "/t/"); ok {
-		parts := strings.Split(after, "/")
-		ref = parts[len(parts)-1]
+		after, _, _ = strings.Cut(after, "?")
+		parts := strings.Split(strings.Trim(after, "/"), "/")
+		return parts[len(parts)-1]
+	}
+	if strings.Contains(ref, "/") { // a URL or path without a task in it
+		return ""
 	}
 	ref, _, _ = strings.Cut(ref, "?")
 	return ref
@@ -30,13 +34,13 @@ const (
 
 var (
 	relative   = regexp.MustCompile(`^\+?(\d+)\s*([dw])$`)
-	monthDay   = regexp.MustCompile(`^(\d{1,2})[-/](\d{1,2})$`)
+	dayMonth   = regexp.MustCompile(`^(\d{1,2})[-/](\d{1,2})$`) // 31-10: day first, like 31-10-2026
 	weekdays   = []string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
 	dateLayout = []string{"2006-01-02", "2006/01/02", "02-01-2006"}
 )
 
 // Due parses today, tomorrow, +3d, 2w, weekday names (the next one), YYYY-MM-DD,
-// MM-DD (next occurrence) and none/clear/-.
+// DD-MM-YYYY, DD-MM (next occurrence) and none/clear/-.
 func Due(text string, today time.Time) (time.Time, DueKind) {
 	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
 	text = strings.ToLower(strings.TrimSpace(text))
@@ -56,7 +60,7 @@ func Due(text string, today time.Time) (time.Time, DueKind) {
 		return today.AddDate(0, 0, n), DueDate
 	}
 	if len(text) >= 3 {
-		if day := slices.Index(weekdays, text[:3]); day >= 0 {
+		if day := slices.Index(weekdays, text[:3]); day >= 0 && strings.HasPrefix(fullWeekday(day), text) {
 			ahead := (day - int(today.Weekday()) + 7) % 7
 			if ahead == 0 {
 				ahead = 7
@@ -69,9 +73,9 @@ func Due(text string, today time.Time) (time.Time, DueKind) {
 			return t, DueDate
 		}
 	}
-	if m := monthDay.FindStringSubmatch(text); m != nil {
-		month, _ := strconv.Atoi(m[1])
-		day, _ := strconv.Atoi(m[2])
+	if m := dayMonth.FindStringSubmatch(text); m != nil {
+		day, _ := strconv.Atoi(m[1])
+		month, _ := strconv.Atoi(m[2])
 		if month < 1 || month > 12 || day < 1 || day > 31 {
 			return time.Time{}, DueInvalid
 		}

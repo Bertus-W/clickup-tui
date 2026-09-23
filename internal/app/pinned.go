@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"sync"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/cache"
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
+	"codeberg.org/b-wisman/clickup-tui/internal/style"
 )
 
 // Pinned tasks live in their own panel, can come from any list and survive restarts: they
@@ -44,8 +46,12 @@ func (a *App) TogglePin() {
 		return
 	}
 	if i := a.findPinned(t.ID); i >= 0 {
-		a.Pinned = slices.Delete(slices.Clone(a.Pinned), i, i+1)
-		a.PinnedSel = min(a.PinnedSel, max(len(a.Pinned)-1, 0))
+		shownPin := a.Detail == a.Pinned[i]
+		a.removePinned(i)
+		if shownPin { // unpinned from the pinned panel: show what's highlighted there now
+			a.Detail, a.Comments = nil, nil
+			a.SelectPinned(a.PinnedSel)
+		}
 		a.log("Unpinned " + t.Label())
 		a.UI.Notify(Info, "Unpinned "+t.Label())
 	} else {
@@ -54,6 +60,16 @@ func (a *App) TogglePin() {
 		a.log("Pinned " + t.Label())
 		a.UI.Notify(Info, "Pinned "+t.Label()+" (4 to see pinned tasks)")
 	}
+	a.persistPinned()
+}
+
+// removePinned drops pin i, keeping the highlight on the same task where possible.
+func (a *App) removePinned(i int) {
+	a.Pinned = slices.Delete(slices.Clone(a.Pinned), i, i+1)
+	if i < a.PinnedSel {
+		a.PinnedSel--
+	}
+	a.PinnedSel = min(a.PinnedSel, max(len(a.Pinned)-1, 0))
 	a.persistPinned()
 }
 
@@ -77,6 +93,7 @@ func (a *App) RefreshPinned() {
 	for i, t := range a.Pinned {
 		ids[i] = t.ID
 	}
+	touched := maps.Clone(a.touch)
 	a.run("pinned", func(ctx context.Context, apply func(func())) {
 		fresh := make([]clickup.Task, len(ids))
 		errs := make([]error, len(ids))
@@ -93,15 +110,20 @@ func (a *App) RefreshPinned() {
 				}
 				if e, ok := errors.AsType[*clickup.APIError](errs[i]); ok && e.Status == http.StatusNotFound {
 					a.log("Unpinned " + a.Pinned[j].Label() + ": it no longer exists in ClickUp")
-					a.Pinned = slices.Delete(a.Pinned, j, j+1)
+					if a.Detail == a.Pinned[j] {
+						a.Detail, a.Comments = nil, nil
+					}
+					a.removePinned(j)
 					continue
 				}
-				if errs[i] == nil {
+				switch {
+				case errs[i] != nil:
+					a.log(style.Dim("Refreshing pinned " + a.Pinned[j].Label() + ": " + errs[i].Error()))
+				case a.touch[id] == touched[id]: // skip data older than a local edit
 					*a.Pinned[j] = fresh[i]
 					a.propagate(a.Pinned[j])
 				}
 			}
-			a.PinnedSel = min(a.PinnedSel, max(len(a.Pinned)-1, 0))
 			a.persistPinned()
 		})
 	})

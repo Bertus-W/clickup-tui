@@ -1,16 +1,20 @@
 // Command cu is a fast, lazygit-style terminal UI for ClickUp.
 //
-//	cu              open the TUI
+//	cu              open the TUI (the first time, it asks for your API token and workspace)
+//	cu setup        ask for the API token and workspace again
 //	cu demo         try it offline against a built-in demo project
 //	cu seed         create the demo project in your workspace (idempotent)
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+
+	"golang.org/x/term"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/app"
 	"codeberg.org/b-wisman/clickup-tui/internal/cache"
@@ -19,6 +23,7 @@ import (
 	"codeberg.org/b-wisman/clickup-tui/internal/fake"
 	"codeberg.org/b-wisman/clickup-tui/internal/gui"
 	"codeberg.org/b-wisman/clickup-tui/internal/seed"
+	"codeberg.org/b-wisman/clickup-tui/internal/setup"
 )
 
 func main() {
@@ -52,27 +57,50 @@ func run(args []string) error {
 		}
 		defer c.Close()
 		return runTUI(fake.Demo().Client(), c, "")
+	case "setup":
+		if _, err := runSetup(); err != nil {
+			return err
+		}
+		return run(nil)
 	case "seed":
 		return runSeed(args)
 	case "-h", "--help", "help":
-		fmt.Println("usage: cu [demo | seed [-space NAME] [-list NAME]]")
+		fmt.Println("usage: cu [setup | demo | seed [-space NAME] [-list NAME]]")
 		return nil
 	}
 	return fmt.Errorf("unknown command %q (try cu help)", cmd)
 }
 
+// loadConfig loads the config, running the first-launch setup when there is no token yet.
 func loadConfig() (config.Config, error) {
 	cfg, err := config.Load()
 	if err != nil {
+		return cfg, fmt.Errorf("reading %s: %w", config.File(), err)
+	}
+	if cfg.Token != "" {
+		return cfg, nil
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return cfg, fmt.Errorf("no ClickUp API token found. Run cu in a terminal to set it up, "+
+			"export CLICKUP_API_TOKEN=pk_..., or put `token = \"pk_...\"` in %s", config.File())
+	}
+	saved, err := runSetup()
+	if err != nil {
 		return cfg, err
 	}
-	if cfg.Token == "" {
-		return cfg, fmt.Errorf("no ClickUp API token found.\n"+
-			"Create one under ClickUp → Settings → Apps → API Token, then either:\n"+
-			"  export CLICKUP_API_TOKEN=pk_...\n"+
-			"or put `token = \"pk_...\"` in %s", config.File())
-	}
+	cfg.Token, cfg.TeamID = saved.Token, saved.TeamID
 	return cfg, nil
+}
+
+// runSetup asks for the token (hidden) and workspace in the terminal and saves them.
+func runSetup() (config.Config, error) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return setup.Run(ctx, setup.Terminal{
+		In:     bufio.NewReader(os.Stdin),
+		Out:    os.Stdout,
+		Secret: func() (string, error) { b, err := term.ReadPassword(int(os.Stdin.Fd())); return string(b), err },
+	}, clickup.New)
 }
 
 func runTUI(api *clickup.Client, c *cache.Cache, teamPref string) error {

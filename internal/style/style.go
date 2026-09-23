@@ -38,6 +38,8 @@ var (
 	Cyan           = sgr("36")
 	BoldCyan       = sgr("1;36")
 	Reverse        = sgr("7")
+	Italic         = sgr("3")
+	Strike         = sgr("2;9")
 )
 
 var hexPattern = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)

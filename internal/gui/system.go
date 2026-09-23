@@ -3,18 +3,29 @@ package gui
 import (
 	"cmp"
 	"encoding/base64"
-	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/atotto/clipboard"
 )
 
-// runEditor opens text in $VISUAL/$EDITOR while the TUI is suspended, like lazygit's `e`.
+// editorCommand is $VISUAL or $EDITOR (which may carry arguments, e.g. "code --wait"),
+// defaulting to vi, or Notepad on Windows.
+func editorCommand() []string {
+	fallback := "vi"
+	if runtime.GOOS == "windows" {
+		fallback = "notepad"
+	}
+	return strings.Fields(cmp.Or(os.Getenv("VISUAL"), os.Getenv("EDITOR"), fallback))
+}
+
+// runEditor opens text in the editor while the TUI is suspended, like lazygit's `e`.
 // ok is false when the editor failed or couldn't run.
 func (gui *Gui) runEditor(initial string) (string, bool, error) {
-	editor := cmp.Or(os.Getenv("VISUAL"), os.Getenv("EDITOR"), "vi")
 	f, err := os.CreateTemp("", "clickup-*.md")
 	if err != nil {
 		return "", false, err
@@ -26,47 +37,52 @@ func (gui *Gui) runEditor(initial string) (string, bool, error) {
 	}
 	f.Close()
 
+	editor := editorCommand()
 	if err := gui.g.Suspend(); err != nil {
 		return "", false, err
 	}
-	cmd := exec.Command("sh", "-c", editor+` "$1"`, "sh", f.Name())
+	// Run the editor directly (no shell), so it works the same on Windows.
+	cmd := exec.Command(editor[0], append(editor[1:], f.Name())...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	runErr := cmd.Run()
 	if err := gui.g.Resume(); err != nil {
 		return "", false, err
 	}
 	if runErr != nil {
-		return "", false, fmt.Errorf("%s: %w", editor, runErr)
+		return "", false, fmt.Errorf("%s: %w", strings.Join(editor, " "), runErr)
 	}
 	data, err := os.ReadFile(f.Name())
 	return string(data), err == nil, err
 }
 
-// copyToClipboard uses the platform tool, falling back to the OSC 52 escape sequence.
+// copyToClipboard uses the system clipboard (Windows, macOS, X11 and Wayland), falling
+// back to the OSC 52 escape sequence, which most terminals turn into a copy.
 func copyToClipboard(text string) error {
-	for _, args := range [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}} {
-		if path, err := exec.LookPath(args[0]); err == nil {
-			cmd := exec.Command(path, args[1:]...)
-			cmd.Stdin = strings.NewReader(text)
-			return cmd.Run()
+	if !clipboard.Unsupported {
+		if err := clipboard.WriteAll(text); err == nil {
+			return nil
 		}
 	}
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
-		return errors.New("no clipboard tool found")
+	var out io.Writer = os.Stdout
+	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+		defer tty.Close()
+		out = tty
 	}
-	defer tty.Close()
-	_, err = fmt.Fprintf(tty, "\x1b]52;c;%s\a", base64.StdEncoding.EncodeToString([]byte(text)))
+	_, err := fmt.Fprintf(out, "\x1b]52;c;%s\a", base64.StdEncoding.EncodeToString([]byte(text)))
 	return err
 }
 
 func openURL(url string) error {
-	name := "xdg-open"
+	cmd := exec.Command("xdg-open", url)
 	switch runtime.GOOS {
 	case "darwin":
-		name = "open"
+		cmd = exec.Command("open", url)
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	}
-	return exec.Command(name, url).Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Wait() // reap it, so no zombie process is left behind
+	return nil
 }

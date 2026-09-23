@@ -61,3 +61,46 @@ func TestTimeSpec(t *testing.T) {
 		t.Error("a log without a duration should fail")
 	}
 }
+
+// Durations people actually type, and typos that must not turn into huge entries.
+func TestDurationWordsAndTypos(t *testing.T) {
+	now := time.Date(2026, 9, 23, 15, 0, 0, 0, time.Local)
+	for text, want := range map[string]time.Duration{
+		"45 min review": 45 * time.Minute, "90 m": 90 * time.Minute, "2 hours": 2 * time.Hour,
+		"1h 30": 90 * time.Minute, "1h 30m": 90 * time.Minute, "1,5 uur": 90 * time.Minute,
+	} {
+		s, err := Time(text, now)
+		if err != nil || s.Duration != want {
+			t.Errorf("Time(%q) = %v, %v; want %v", text, s.Duration, err, want)
+		}
+	}
+	if s, _ := Time("45 min review", now); s.Note != "review" {
+		t.Errorf("note = %q", s.Note)
+	}
+	for _, text := range []string{"45", "inf", "1e3", "1:5", "2h60", "0", "25h", "2026-12-01 review"} {
+		if _, err := Time("1h "+text, now); text == "2026-12-01 review" && err == nil {
+			t.Errorf("logging on a future date should fail")
+		}
+		if text != "2026-12-01 review" {
+			if s, err := Time(text, now); err == nil {
+				t.Errorf("Time(%q) = %v, want an error", text, s.Duration)
+			}
+		}
+	}
+}
+
+// Clock times are wall-clock times, also on daylight saving days.
+func TestAtIsDaylightSavingSafe(t *testing.T) {
+	ams, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	spring := time.Date(2026, 3, 29, 0, 0, 0, 0, ams) // clocks go forward at 02:00
+	if got := At(spring, 9*time.Hour); got.Hour() != 9 {
+		t.Errorf("09:00 on the spring change day = %v", got)
+	}
+	autumn := time.Date(2026, 10, 25, 0, 0, 0, 0, ams)
+	if got := At(autumn, 9*time.Hour); got.Hour() != 9 {
+		t.Errorf("09:00 on the autumn change day = %v", got)
+	}
+}

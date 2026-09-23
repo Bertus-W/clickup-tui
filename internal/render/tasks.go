@@ -4,6 +4,7 @@ package render
 import (
 	"cmp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,10 +43,11 @@ func compareTasks(a, b *clickup.Task) int {
 	)
 }
 
-// Row is a task in display order with its subtask depth.
+// Row is a task in display order with its subtask depth and the group it's listed under.
 type Row struct {
 	Task  *clickup.Task
 	Depth int
+	Group Group
 }
 
 // Ordered sorts like ClickUp's list view: by status, subtasks nested under their parent.
@@ -71,7 +73,7 @@ func Ordered(tasks []*clickup.Task) []Row {
 			return
 		}
 		seen[t.ID] = true
-		rows = append(rows, Row{t, depth})
+		rows = append(rows, Row{Task: t, Depth: depth})
 		kids := children[t.ID]
 		slices.SortStableFunc(kids, func(a, b *clickup.Task) int { return cmp.Compare(a.OrderIndex, b.OrderIndex) })
 		for _, kid := range kids {
@@ -139,10 +141,18 @@ func Initials(u clickup.User) string {
 	return string(r[:min(2, len(r))])
 }
 
+// AssigneesText shows up to two people's initials; more become "+N" so the column fits.
 func AssigneesText(t *clickup.Task) string {
-	parts := make([]string, len(t.Assignees))
-	for i, a := range t.Assignees {
+	shown := t.Assignees
+	if len(shown) > 2 {
+		shown = shown[:1]
+	}
+	parts := make([]string, len(shown))
+	for i, a := range shown {
 		parts[i] = style.Fg(a.Color, style.Bold)(Initials(a))
+	}
+	if more := len(t.Assignees) - len(shown); more > 0 {
+		parts = append(parts, style.Dim("+"+strconv.Itoa(more)))
 	}
 	return strings.Join(parts, " ")
 }
@@ -189,6 +199,9 @@ type Table struct {
 // NewTable fits columns into width; dropdown fields get columns while the name keeps ≥24 cols.
 func NewTable(tasks []*clickup.Task, width int, showList bool) Table {
 	t := Table{Status: 14, Who: 6, Due: 6}
+	if width < 90 { // narrow: the coloured dot says enough, the name needs the room
+		t.Status = 2
+	}
 	fixed := t.Status + t.Who + t.Due + 1 + 4 // flag column, one space before each of name, who, due, flag
 	if showList && width >= 80 {
 		t.List = 14
@@ -211,7 +224,11 @@ func (tbl Table) Line(row Row, now time.Time) string {
 	prefix, name := NameCell(row)
 	nameWidth := tbl.Name - style.Width(prefix.Text)
 	var b strings.Builder
-	b.WriteString(StatusCell(t).Fit(tbl.Status))
+	status := StatusCell(t)
+	if tbl.Status <= 2 {
+		status.Text = "●"
+	}
+	b.WriteString(status.Fit(tbl.Status))
 	b.WriteString(" ")
 	b.WriteString(prefix.Fit(style.Width(prefix.Text)))
 	b.WriteString(name.Fit(nameWidth))

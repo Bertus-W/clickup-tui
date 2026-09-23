@@ -107,7 +107,7 @@ func Demo() *Server {
 	}
 	s := New(tasks...)
 	s.Fields = fields
-	// Some time logged this week, so the timesheet (W) has something to show.
+	// Some time logged this week, so the timesheet (T) has something to show.
 	monday := today.AddDate(0, 0, -((int(today.Weekday()) + 6) % 7))
 	day := func(d, hour int) time.Time {
 		return time.Date(monday.Year(), monday.Month(), monday.Day()+d, hour, 0, 0, 0, time.Local)

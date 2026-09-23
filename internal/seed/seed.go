@@ -77,6 +77,16 @@ func Run(ctx context.Context, c *clickup.Client, teamID string, opts Options) er
 
 	for _, d := range Tasks {
 		t, ok := existing[d.Name]
+		if ok {
+			for _, sub := range d.Subtasks { // an earlier run may have stopped halfway
+				if s, found := existing[sub]; !found || string(s.Parent) != t.ID {
+					if _, err := c.CreateTask(ctx, listID, map[string]any{"name": sub, "parent": t.ID}); err != nil {
+						return err
+					}
+					log("task: added missing subtask %q", sub)
+				}
+			}
+		}
 		if !ok {
 			body := map[string]any{"name": d.Name, "markdown_content": d.Description}
 			if d.Priority > 0 {

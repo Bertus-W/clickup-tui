@@ -55,7 +55,7 @@ func ms(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
 
 // TimeEntries lists my time entries between from and to; taskID narrows it to one task.
 func (c *Client) TimeEntries(ctx context.Context, teamID string, from, to time.Time, taskID string) ([]TimeEntry, error) {
-	q := url.Values{"start_date": {ms(from)}, "end_date": {ms(to)}}
+	q := url.Values{"start_date": {ms(from)}, "end_date": {ms(to)}, "include_location_names": {"true"}}
 	if taskID != "" {
 		q.Set("task_id", taskID)
 	}

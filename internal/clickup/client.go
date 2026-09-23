@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -80,6 +82,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			return err
 		}
 	}
+	// A POST that failed after it may have reached ClickUp is not retried: that could create
+	// the task, comment or time entry twice. A 429 means it was rejected, so that's safe.
+	idempotent := method != http.MethodPost
 	const attempts = 4
 	for attempt := range attempts {
 		last := attempt == attempts-1
@@ -88,14 +93,14 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		status, data, header, err := c.once(ctx, method, path, query, payload)
 		switch {
 		case err != nil:
-			if last || ctx.Err() != nil {
+			if last || ctx.Err() != nil || !idempotent {
 				return fmt.Errorf("network error: %w", err)
 			}
 		case status == http.StatusTooManyRequests && !last:
 			if reset, err := strconv.ParseInt(header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 				backoff = min(max(time.Until(time.Unix(reset, 0)), time.Second), 30*time.Second)
 			}
-		case status >= 500 && !last:
+		case status >= 500 && !last && idempotent:
 		case status >= 400:
 			var e struct {
 				Err string `json:"err"`
@@ -127,6 +132,9 @@ func (c *Client) once(ctx context.Context, method, path string, query url.Values
 		return 0, nil, nil, ctx.Err()
 	}
 	u := c.BaseURL + path
+	if strings.HasPrefix(path, "/v3/") { // the few v3 endpoints: .../api/v2 → .../api/v3/...
+		u = strings.TrimSuffix(c.BaseURL, "/v2") + path
+	}
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
@@ -315,14 +323,33 @@ func (c *Client) GetTask(ctx context.Context, taskID, teamID string) (Task, erro
 	return out, err
 }
 
+// Comments returns all comments of a task. ClickUp returns the newest 25 per request;
+// older pages are fetched with start/start_id of the oldest comment so far.
 func (c *Client) Comments(ctx context.Context, taskID string) ([]Comment, error) {
-	var out struct{ Comments []Comment }
-	err := c.do(ctx, http.MethodGet, "/task/"+taskID+"/comment", nil, nil, &out)
-	return nonNil(out.Comments), err
+	var all []Comment
+	q := url.Values{}
+	for range 40 { // at most 1000 comments
+		var out struct{ Comments []Comment }
+		if err := c.do(ctx, http.MethodGet, "/task/"+taskID+"/comment", q, nil, &out); err != nil {
+			return nonNil(all), err
+		}
+		all = append(all, out.Comments...)
+		if len(out.Comments) < 25 {
+			break
+		}
+		oldest := out.Comments[len(out.Comments)-1]
+		q = url.Values{"start": {string(oldest.Date)}, "start_id": {string(oldest.ID)}}
+	}
+	return nonNil(all), nil
 }
 
-func (c *Client) CreateComment(ctx context.Context, taskID, text string) error {
+// CreateComment posts a comment. With mentions it's sent as rich parts, so ClickUp tags
+// (and notifies) the people mentioned; plain text otherwise.
+func (c *Client) CreateComment(ctx context.Context, taskID, text string, parts []CommentPart) error {
 	body := map[string]any{"comment_text": text, "notify_all": false}
+	if slices.ContainsFunc(parts, func(p CommentPart) bool { return p.Type == "tag" }) {
+		body = map[string]any{"comment": parts, "notify_all": false}
+	}
 	return c.do(ctx, http.MethodPost, "/task/"+taskID+"/comment", nil, body, nil)
 }
 
@@ -337,6 +364,11 @@ func (c *Client) CreateTask(ctx context.Context, listID string, fields map[strin
 	var out Task
 	err := c.do(ctx, http.MethodPost, "/list/"+listID+"/task", nil, fields, &out)
 	return out, err
+}
+
+// MoveTask moves a task to another list (its home list). Only API v3 can do this.
+func (c *Client) MoveTask(ctx context.Context, teamID, taskID, listID string) error {
+	return c.do(ctx, http.MethodPut, "/v3/workspaces/"+teamID+"/tasks/"+taskID+"/home_list/"+listID, nil, nil, nil)
 }
 
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {

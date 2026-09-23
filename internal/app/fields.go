@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"slices"
 	"strconv"
@@ -165,11 +166,9 @@ func (a *App) askField(f clickup.CustomField, save func(fieldEdit)) {
 		if d, ok := render.Millis(clickup.FlexString(strings.Trim(string(f.Value), `"`))); ok {
 			value = d.Format(time.DateOnly)
 		}
-		a.UI.Prompt(Prompt{Title: f.Name, Value: value, Hint: dateHint}, func(answer string) {
+		a.UI.Prompt(Prompt{Title: f.Name, Value: value, Hint: dateHint, Check: a.checkDate}, func(answer string) {
 			day, kind := parse.Due(answer, a.Now())
 			switch kind {
-			case parse.DueInvalid:
-				a.UI.Notify(Error, "Can't parse date: "+answer)
 			case parse.DueClear:
 				save(clear)
 			case parse.DueDate:
@@ -212,7 +211,13 @@ func (a *App) promptField(f clickup.CustomField, save func(fieldEdit)) {
 	default:
 		shown, hint = scalarString(f.Value), "empty to clear"
 	}
-	a.UI.Prompt(Prompt{Title: f.Name, Value: shown, Hint: hint, AllowEmpty: true}, func(answer string) {
+	check := func(answer string) error {
+		if _, err := strconv.ParseFloat(answer, 64); numeric && answer != "" && err != nil {
+			return fmt.Errorf("%q isn't a number", answer)
+		}
+		return nil
+	}
+	a.UI.Prompt(Prompt{Title: f.Name, Value: shown, Hint: hint, AllowEmpty: true, Check: check}, func(answer string) {
 		answer = strings.TrimSpace(answer)
 		if answer == shown {
 			return
@@ -227,8 +232,7 @@ func (a *App) promptField(f clickup.CustomField, save func(fieldEdit)) {
 		}
 		n, err := strconv.ParseFloat(answer, 64)
 		if err != nil {
-			a.UI.Notify(Error, "Not a number: "+answer)
-			return
+			return // Check refused it
 		}
 		if f.Type == "manual_progress" {
 			start, end := float64(f.TypeConfig.Start), float64(cmp.Or(f.TypeConfig.End, 100))

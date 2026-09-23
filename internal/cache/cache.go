@@ -37,6 +37,7 @@ func Open(path string) (*Cache, error) {
 	for _, stmt := range []string{
 		`PRAGMA journal_mode=WAL`,
 		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA busy_timeout=3000`, // a second cu instance waits instead of failing
 		`CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value BLOB NOT NULL, updated INTEGER NOT NULL)`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {

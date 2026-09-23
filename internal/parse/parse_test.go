@@ -11,6 +11,8 @@ func TestTaskRef(t *testing.T) {
 		"https://app.clickup.com/t/abc123": "abc123",
 		"https://app.clickup.com/t/9000/DEV-12?x=1": "DEV-12",
 		"  https://app.clickup.com/t/86abc/  ":      "86abc",
+		"https://app.clickup.com/t/":                "",
+		"https://app.clickup.com/9000/home":         "",
 	} {
 		if got := TaskRef(ref); got != want {
 			t.Errorf("TaskRef(%q) = %q, want %q", ref, got, want)
@@ -29,7 +31,7 @@ func TestDue(t *testing.T) {
 		"fri":        day(2026, 9, 25),
 		"wed":        day(2026, 9, 30), // today is Wednesday: next week's
 		"2026-12-01": day(2026, 12, 1),
-		"01-15":      day(2027, 1, 15),
+		"15-01":      day(2027, 1, 15), // day first, like 15-01-2027
 	} {
 		got, kind := Due(text, today)
 		if kind != DueDate || !got.Equal(want) {

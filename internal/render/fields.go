@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/mattn/go-runewidth"
+
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
 	"codeberg.org/b-wisman/clickup-tui/internal/style"
 )
@@ -231,7 +233,7 @@ func DropdownColumns(tasks []*clickup.Task) []DropdownColumn {
 	for id, f := range seen {
 		longest := 4
 		for _, o := range f.TypeConfig.Options {
-			longest = max(longest, len(o.Title()))
+			longest = max(longest, runewidth.StringWidth(o.Title()))
 		}
 		cols = append(cols, DropdownColumn{FieldID: id, Name: f.Name, Width: min(12, longest+2)})
 	}
@@ -249,6 +251,6 @@ func DropdownCell(t *clickup.Task, col DropdownColumn) string {
 	if !ok {
 		return ""
 	}
-	title := []rune(o.Title())
-	return style.Chip(string(title[:min(len(title), col.Width-2)]), o.Color)
+	// Truncate by display width: CJK and emoji take two columns.
+	return style.Chip(runewidth.Truncate(o.Title(), col.Width-2, "…"), o.Color)
 }

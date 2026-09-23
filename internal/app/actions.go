@@ -3,7 +3,9 @@ package app
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,43 +29,83 @@ func (a *App) afterLocalChange() {
 
 // mutate applies change immediately, then sends it; on failure the task is restored.
 // change must replace slices rather than modify them in place, so the snapshot stays intact.
+//
+// Only the fields this change touched are reverted or taken from the server's answer, so
+// overlapping edits of one task (status, then priority before the first returns) don't undo
+// each other.
 func (a *App) mutate(t *clickup.Task, what string, change func(*clickup.Task), send func(context.Context) (*clickup.Task, error)) {
+	a.mutateThen(t, what, change, send, nil)
+}
+
+// mutateThen is mutate with a callback once the change was saved (err nil) or reverted.
+func (a *App) mutateThen(t *clickup.Task, what string, change func(*clickup.Task), send func(context.Context) (*clickup.Task, error), after func(error)) {
 	before := *t
 	change(t)
+	touched := changedFields(&before, t)
+	a.touch[t.ID]++
 	a.propagate(t)
 	a.afterLocalChange()
 	a.log(what + " · " + t.Label())
 	a.run("", func(ctx context.Context, apply func(func())) {
 		updated, err := send(ctx)
 		apply(func() {
+			a.touch[t.ID]++
 			// propagate also reaches a copy that a list reload created meanwhile.
 			if err != nil {
-				*t = before
+				copyFields(t, &before, touched)
 				a.propagate(t)
+				if after != nil {
+					after(err)
+				}
 				a.afterLocalChange()
 				a.error("Update failed, reverted", err)
 				return
 			}
 			if updated != nil {
-				merge(t, updated)
+				fields := append(slices.Clone(touched), dateUpdatedField)
+				if updated.MarkdownDescription == "" { // update responses don't carry it
+					fields = slices.DeleteFunc(fields, func(i int) bool { return i == markdownField })
+				}
+				copyFields(t, updated, fields)
 			}
 			a.propagate(t)
 			_ = cache.Put(a.Cache, "task:"+t.ID, t)
+			if after != nil {
+				after(nil)
+			}
 			a.afterLocalChange()
 		})
 	})
 }
 
-// merge copies a server response into t, keeping what update responses leave out.
-func merge(t, updated *clickup.Task) {
-	keep := *t
-	*t = *updated
-	t.MarkdownDescription = cmp.Or(t.MarkdownDescription, keep.MarkdownDescription)
-	if t.Subtasks == nil {
-		t.Subtasks = keep.Subtasks
+var (
+	taskType         = reflect.TypeFor[clickup.Task]()
+	dateUpdatedField = fieldIndex("DateUpdated")
+	markdownField    = fieldIndex("MarkdownDescription")
+)
+
+func fieldIndex(name string) int {
+	f, _ := taskType.FieldByName(name)
+	return f.Index[0]
+}
+
+// changedFields lists the task fields that differ between a and b.
+func changedFields(a, b *clickup.Task) []int {
+	va, vb := reflect.ValueOf(a).Elem(), reflect.ValueOf(b).Elem()
+	var out []int
+	for i := range taskType.NumField() {
+		if !reflect.DeepEqual(va.Field(i).Interface(), vb.Field(i).Interface()) {
+			out = append(out, i)
+		}
 	}
-	if t.CustomFields == nil {
-		t.CustomFields = keep.CustomFields
+	return out
+}
+
+// copyFields copies the given fields from src into dst.
+func copyFields(dst, src *clickup.Task, fields []int) {
+	vd, vs := reflect.ValueOf(dst).Elem(), reflect.ValueOf(src).Elem()
+	for _, i := range fields {
+		vd.Field(i).Set(vs.Field(i))
 	}
 }
 
@@ -132,7 +174,8 @@ func (a *App) NextStatus() {
 			}
 			items = append(items, MenuItem{Key: optionKeys[i], Label: label, Value: s})
 		}
-		a.UI.Menu("Status", items, (current+1)%len(items), func(item MenuItem) {
+		// The next status, but no wrapping around: space, enter on a closed task keeps it closed.
+		a.UI.Menu("Status", items, min(current+1, len(items)-1), func(item MenuItem) {
 			if s := item.Value.(clickup.Status); !strings.EqualFold(s.Status, t.Status.Status) {
 				a.setStatus(t, s)
 			}
@@ -164,32 +207,48 @@ func (a *App) SetPriority() {
 	if t == nil {
 		return
 	}
-	var options []Option
-	for i, name := range priorities {
-		options = append(options, Option{ID: strconv.Itoa(i + 1), Label: style.Fg(render.PriorityColors[name], style.Plain)("⚑ " + name)})
-	}
-	options = append(options, Option{ID: "none", Label: style.Dim("  none")})
-	current := "none"
+	current := 0
 	if t.Priority != nil {
-		current = string(t.Priority.ID)
+		current = int(t.Priority.ID.Int())
 	}
-	a.UI.Pick("Priority", options, current, func(choice string) {
-		if choice == current {
+	a.priorityMenu(current, func(n int) {
+		if n == current {
 			return
 		}
-		if choice == "none" {
+		if n == 0 {
 			a.update(t, "Priority → none", func(t *clickup.Task) { t.Priority = nil }, map[string]any{"priority": nil})
 			return
 		}
-		n, _ := strconv.Atoi(choice)
-		name := priorities[n-1]
+		choice, name := strconv.Itoa(n), priorities[n-1]
 		p := &clickup.Priority{ID: clickup.FlexString(choice), Priority: name, Color: render.PriorityColors[name]}
 		a.update(t, "Priority → "+name, func(t *clickup.Task) { t.Priority = p }, map[string]any{"priority": n})
 	})
 }
 
+// priorityMenu asks for a priority: 1 urgent … 4 low, x none (0).
+func (a *App) priorityMenu(current int, then func(int)) {
+	items := make([]MenuItem, 0, len(priorities)+1)
+	for i, name := range priorities {
+		items = append(items, MenuItem{Key: rune('1' + i), Label: style.Fg(render.PriorityColors[name], style.Plain)("⚑ " + name), Value: i + 1})
+	}
+	items = append(items, MenuItem{Key: clearKey, Label: style.Dim("none"), Value: 0})
+	highlighted := len(items) - 1
+	if current > 0 {
+		highlighted = current - 1
+	}
+	a.UI.Menu("Priority", items, highlighted, func(item MenuItem) { then(item.Value.(int)) })
+}
+
 // dateHint documents what parse.Due accepts.
-const dateHint = "today · tomorrow · +3d · +2w · fri · 10-31 · 2026-10-31 · none"
+const dateHint = "today · tomorrow · +3d · +2w · fri · 31-10 · 2026-10-31 · none"
+
+// checkDate is the Check of date prompts.
+func (a *App) checkDate(answer string) error {
+	if _, kind := parse.Due(answer, a.Now()); kind == parse.DueInvalid {
+		return fmt.Errorf("can't read %q as a date", answer)
+	}
+	return nil
+}
 
 func (a *App) SetDue() {
 	t := a.current()
@@ -200,11 +259,9 @@ func (a *App) SetDue() {
 	if due, ok := render.Millis(t.DueDate); ok {
 		value = due.Format(time.DateOnly)
 	}
-	a.UI.Prompt(Prompt{Title: "Due date", Value: value, Hint: dateHint}, func(answer string) {
+	a.UI.Prompt(Prompt{Title: "Due date", Value: value, Hint: dateHint, Check: a.checkDate}, func(answer string) {
 		day, kind := parse.Due(answer, a.Now())
 		switch kind {
-		case parse.DueInvalid:
-			a.UI.Notify(Error, "Can't parse date: "+answer)
 		case parse.DueClear:
 			a.update(t, "Due date cleared", func(t *clickup.Task) { t.DueDate = "" }, map[string]any{"due_date": nil})
 		case parse.DueDate:
@@ -247,24 +304,58 @@ func hasUser(users []clickup.User, id int64) bool {
 	return slices.ContainsFunc(users, func(u clickup.User) bool { return u.ID == id })
 }
 
-func (a *App) toggleAssignee(t *clickup.Task, u clickup.User) {
-	if hasUser(t.Assignees, u.ID) {
-		a.update(t, "Unassigned "+u.Username,
-			func(t *clickup.Task) {
-				t.Assignees = slices.DeleteFunc(slices.Clone(t.Assignees), func(x clickup.User) bool { return x.ID == u.ID })
-			},
-			map[string]any{"assignees": map[string][]int64{"add": {}, "rem": {u.ID}}})
+// AssignMe toggles me on the task, and says which way it went: a toggle can surprise.
+func (a *App) AssignMe() {
+	t := a.current()
+	if t == nil || a.Me.ID == 0 {
 		return
 	}
-	a.update(t, "Assigned "+u.Username,
-		func(t *clickup.Task) { t.Assignees = append(slices.Clone(t.Assignees), u) },
-		map[string]any{"assignees": map[string][]int64{"add": {u.ID}, "rem": {}}})
+	chosen := map[string]bool{}
+	for _, u := range t.Assignees {
+		chosen[strconv.FormatInt(u.ID, 10)] = true
+	}
+	me := strconv.FormatInt(a.Me.ID, 10)
+	chosen[me] = !chosen[me]
+	label := t.Label()
+	a.setAssignees(t, chosen)
+	if chosen[me] {
+		a.UI.Notify(Info, "Assigned you to "+label)
+	} else {
+		a.UI.Notify(Info, "Unassigned you from "+label)
+	}
 }
 
-func (a *App) AssignMe() {
-	if t := a.current(); t != nil && a.Me.ID != 0 {
-		a.toggleAssignee(t, a.Me)
+// setAssignees makes the chosen member ids the task's assignees, in one update.
+func (a *App) setAssignees(t *clickup.Task, chosen map[string]bool) {
+	var add, rem []int64
+	var kept, added []clickup.User
+	var names []string
+	for _, u := range t.Assignees {
+		if chosen[strconv.FormatInt(u.ID, 10)] {
+			kept = append(kept, u)
+		} else {
+			rem = append(rem, u.ID)
+			names = append(names, "-"+u.Username)
+		}
 	}
+	for _, id := range slices.Sorted(keysOf(chosen)) {
+		n, _ := strconv.ParseInt(id, 10, 64)
+		if hasUser(t.Assignees, n) {
+			continue
+		}
+		if u, ok := a.member(id); ok {
+			added = append(added, u)
+			add = append(add, n)
+			names = append(names, "+"+u.Username)
+		}
+	}
+	if len(add)+len(rem) == 0 {
+		return
+	}
+	users := append(kept, added...)
+	a.update(t, "Assignees "+strings.Join(names, " "),
+		func(t *clickup.Task) { t.Assignees = nonNil(users) },
+		map[string]any{"assignees": map[string][]int64{"add": nonNil(add), "rem": nonNil(rem)}})
 }
 
 // memberOptions lists workspace members, marking the ones in selected with ✓.
@@ -274,9 +365,13 @@ func (a *App) memberOptions(selected func(clickup.User) bool) []Option {
 	})
 	options := make([]Option, len(members))
 	for i, u := range members {
-		mark := "  "
-		if selected != nil && selected(u) {
+		mark := ""
+		switch {
+		case selected == nil: // a multi-picker shows its own checkboxes
+		case selected(u):
 			mark = style.Green("✓ ")
+		default:
+			mark = "  "
 		}
 		options[i] = Option{ID: strconv.FormatInt(u.ID, 10), Label: mark + style.Fg(u.Color, style.Plain)(u.Username) + " " + style.Dim(u.Email)}
 	}
@@ -292,18 +387,68 @@ func (a *App) member(id string) (clickup.User, bool) {
 	return members[i], true
 }
 
-// Assign toggles anyone: type part of a name, enter.
+// Assign picks the assignees: space toggles people, enter saves them all at once.
 func (a *App) Assign() {
 	t := a.current()
 	if t == nil {
 		return
 	}
-	options := a.memberOptions(func(u clickup.User) bool { return hasUser(t.Assignees, u.ID) })
-	a.UI.Pick("Assign (type a name, enter toggles)", options, "", func(id string) {
-		if u, ok := a.member(id); ok {
-			a.toggleAssignee(t, u)
-		}
+	current := map[string]bool{}
+	for _, u := range t.Assignees {
+		current[strconv.FormatInt(u.ID, 10)] = true
+	}
+	a.UI.MultiPick("Assignees · "+t.Label(), a.memberOptions(nil), current, func(chosen map[string]bool) {
+		a.setAssignees(t, chosen)
 	})
+}
+
+// MoveTask moves the task to another list: pick it by typing part of its name.
+func (a *App) MoveTask() {
+	t := a.current()
+	if t == nil {
+		return
+	}
+	options := slices.DeleteFunc(a.Lists(), func(o Option) bool { return o.ID == string(t.List.ID) })
+	if len(options) == 0 {
+		a.UI.Notify(Warn, "There is no other list to move it to.")
+		return
+	}
+	a.UI.Pick("Move "+t.Label()+" to list", options, "", func(id string) {
+		label := options[slices.IndexFunc(options, func(o Option) bool { return o.ID == id })].Label
+		parts := strings.Split(label, " / ")
+		a.moveTask(t, id, parts[len(parts)-1])
+	})
+}
+
+// moveTask moves t at once: it leaves the list on screen (unless that's Mine) and comes
+// back if ClickUp refuses.
+func (a *App) moveTask(t *clickup.Task, listID, listName string) {
+	id, teamID, key := t.ID, a.TeamID, a.viewKey()
+	var listCopy *clickup.Task
+	i := slices.IndexFunc(a.Tasks, func(x *clickup.Task) bool { return x.ID == id })
+	if a.View.Kind == "list" && a.View.ID == string(t.List.ID) && i >= 0 {
+		listCopy = a.Tasks[i]
+		a.Tasks = slices.Delete(slices.Clone(a.Tasks), i, i+1)
+	}
+	var picked string // the task selected once t left the list
+	a.mutateThen(t, "Moved to "+listName,
+		func(t *clickup.Task) { t.List = clickup.Ref{ID: clickup.FlexString(listID), Name: listName} },
+		func(ctx context.Context) (*clickup.Task, error) {
+			return nil, a.API.MoveTask(ctx, teamID, id, listID)
+		},
+		func(err error) {
+			if err == nil {
+				a.UI.Notify(Info, "Moved "+t.Label()+" to "+listName)
+				return
+			}
+			if listCopy != nil && a.viewKey() == key && a.find(id) == nil {
+				a.Tasks = slices.Insert(slices.Clone(a.Tasks), min(i, len(a.Tasks)), listCopy)
+				if a.SelectedID == picked { // nobody moved on meanwhile: select it again
+					a.focusTask(listCopy)
+				}
+			}
+		})
+	picked = a.SelectedID
 }
 
 // focusTask highlights t in the table and shows it.
@@ -321,31 +466,42 @@ func (a *App) Delete() {
 		return
 	}
 	a.UI.Confirm("Delete task", fmt.Sprintf("Delete %s “%s”?", t.Label(), t.Name), func() {
-		i := slices.Index(a.Tasks, t)
+		// Remove every copy (list row, pin, task panel) by id: t may be the pinned copy.
+		id, key := t.ID, a.viewKey()
+		byID := func(x *clickup.Task) bool { return x.ID == id }
+		i, j := slices.IndexFunc(a.Tasks, byID), a.findPinned(id)
+		var listCopy, pinCopy *clickup.Task
 		if i >= 0 {
+			listCopy = a.Tasks[i]
 			a.Tasks = slices.Delete(slices.Clone(a.Tasks), i, i+1)
-			a.fixSelection()
 		}
+		if j >= 0 {
+			pinCopy = a.Pinned[j]
+			a.removePinned(j)
+		}
+		if a.Detail != nil && a.Detail.ID == id {
+			a.Detail, a.Comments, a.SelectedID = nil, nil, ""
+		}
+		a.fixSelection()
 		a.log("Delete " + t.Label())
-		id := t.ID
 		a.run("", func(ctx context.Context, apply func(func())) {
 			err := a.API.DeleteTask(ctx, id)
 			apply(func() {
 				if err != nil {
-					if i >= 0 {
-						a.Tasks = slices.Insert(a.Tasks, min(i, len(a.Tasks)), t)
-						a.fixSelection()
+					// Restore only where it still makes sense: same view, not reloaded back in.
+					if listCopy != nil && a.viewKey() == key && a.find(id) == nil {
+						a.Tasks = slices.Insert(a.Tasks, min(i, len(a.Tasks)), listCopy)
 					}
+					if pinCopy != nil && a.findPinned(id) < 0 {
+						a.Pinned = slices.Insert(a.Pinned, min(j, len(a.Pinned)), pinCopy)
+						a.persistPinned()
+					}
+					a.fixSelection()
 					a.error("Delete failed, restored", err)
 					return
 				}
 				a.persistView()
 				a.Cache.Delete("task:" + id)
-				if j := a.findPinned(id); j >= 0 {
-					a.Pinned = slices.Delete(a.Pinned, j, j+1)
-					a.PinnedSel = min(a.PinnedSel, max(len(a.Pinned)-1, 0))
-					a.persistPinned()
-				}
 			})
 		})
 	})
@@ -354,7 +510,8 @@ func (a *App) Delete() {
 // Comment adds a one-line comment; CommentInEditor opens $EDITOR for longer ones.
 func (a *App) Comment() {
 	if t := a.current(); t != nil {
-		a.UI.Prompt(Prompt{Title: "Comment on " + t.Label(), Placeholder: "C for a multi-line comment in $EDITOR"},
+		complete := func(text string) string { return completeMention(text, a.Members()) }
+		a.UI.Prompt(Prompt{Title: "Comment on " + t.Label(), Hint: "@name + tab mentions someone · C: multi-line in $EDITOR", Complete: complete},
 			func(text string) { a.postComment(t, text) })
 	}
 }
@@ -374,28 +531,38 @@ func (a *App) postComment(t *clickup.Task, text string) {
 		ID: "pending", CommentText: text, User: a.Me, Pending: true,
 		Date: clickup.FlexString(strconv.FormatInt(a.Now().UnixMilli(), 10)),
 	}
-	if a.Detail == t {
-		a.Comments = append(slices.Clone(a.Comments), pending)
-	}
-	a.log("Comment on " + t.Label())
 	id := t.ID
+	shown := func() bool { return a.Detail != nil && a.Detail.ID == id } // objects get replaced on reload
+	if shown() {
+		a.Comments = append(slices.Clone(a.Comments), pending)
+		a.UI.ShowLatestComment()
+	}
+	label := t.Label()
+	parts, mentioned := mentionParts(text, a.Members())
+	names := make([]string, len(mentioned))
+	for i, u := range mentioned {
+		names[i] = "@" + u.Username
+	}
+	a.log(strings.TrimSpace("Comment on " + label + " " + strings.Join(names, " ")))
 	a.run("", func(ctx context.Context, apply func(func())) {
-		err := a.API.CreateComment(ctx, id, text)
+		err := a.API.CreateComment(ctx, id, text, parts)
 		var fresh []clickup.Comment
 		if err == nil {
 			fresh, err = a.API.Comments(ctx, id)
 		}
 		apply(func() {
 			if err != nil {
-				if a.Detail == t {
-					a.Comments = slices.DeleteFunc(a.Comments, func(c clickup.Comment) bool { return c.Pending })
+				if shown() {
+					a.Comments = slices.DeleteFunc(slices.Clone(a.Comments), func(c clickup.Comment) bool { return c.Pending })
 				}
 				a.error("Comment failed", err)
 				return
 			}
 			_ = cache.Put(a.Cache, "comments:"+id, fresh)
-			if a.Detail == t {
+			a.UI.Notify(Info, "Comment posted on "+label)
+			if shown() {
 				a.Comments = fresh
+				a.UI.ShowLatestComment()
 			}
 		})
 	})
@@ -403,7 +570,13 @@ func (a *App) postComment(t *clickup.Task, text string) {
 
 // GoTo jumps to a task by id, custom id or URL, even outside the current view.
 func (a *App) GoTo() {
-	a.UI.Prompt(Prompt{Title: "Go to task", Placeholder: "task id, custom id (ABC-123) or URL"}, func(ref string) {
+	check := func(ref string) error {
+		if parse.TaskRef(ref) == "" {
+			return errors.New("that URL doesn't point at a task")
+		}
+		return nil
+	}
+	a.UI.Prompt(Prompt{Title: "Go to task", Placeholder: "task id, custom id (ABC-123) or URL", Check: check}, func(ref string) {
 		id := parse.TaskRef(ref)
 		if i := slices.IndexFunc(a.Tasks, func(t *clickup.Task) bool { return t.ID == id || t.CustomID == id }); i >= 0 {
 			if !render.Matches(a.Tasks[i], a.Filter) {

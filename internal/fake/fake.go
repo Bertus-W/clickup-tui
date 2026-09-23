@@ -39,8 +39,10 @@ type Server struct {
 	Fields      []clickup.CustomField // field definitions on the list
 	Requests    []string
 	FailUpdates bool
+	FailField   string              // task updates that set this field fail
 	Entries     []clickup.TimeEntry // time tracking
 	Running     *clickup.TimeEntry
+	Mentions    []clickup.CommentPart // the mentions of every comment posted
 	nextEntry   int
 
 	mux *http.ServeMux
@@ -167,10 +169,20 @@ func (s *Server) routes(mux *http.ServeMux) {
 		return clickup.List{ID: clickup.FlexString(r.PathValue("list")), Name: "Backlog", Statuses: Statuses}
 	})
 	handle("GET "+p+"/list/{list}/task", func(_ http.ResponseWriter, r *http.Request) any {
-		if r.PathValue("list") != ListID {
-			return map[string]any{"tasks": []clickup.Task{}, "last_page": true}
+		inList := func(t *clickup.Task) bool { return string(t.List.ID) == r.PathValue("list") }
+		return map[string]any{"tasks": s.visible(r, inList), "last_page": true}
+	})
+	handle("PUT /api/v3/workspaces/{team}/tasks/{id}/home_list/{list}", func(_ http.ResponseWriter, r *http.Request) any {
+		t := s.Tasks[r.PathValue("id")]
+		if t == nil {
+			return apiErr{404, "Task not found"}
 		}
-		return map[string]any{"tasks": s.visible(r, func(*clickup.Task) bool { return true }), "last_page": true}
+		if s.FailUpdates {
+			return apiErr{400, "nope"}
+		}
+		list := r.PathValue("list")
+		t.List = clickup.Ref{ID: clickup.FlexString(list), Name: map[string]string{ListID: "Backlog", "L2": "Inbox"}[list]}
+		return map[string]any{}
 	})
 	handle("GET "+p+"/team/{team}/task", func(_ http.ResponseWriter, r *http.Request) any {
 		uid, _ := strconv.ParseInt(r.URL.Query().Get("assignees[]"), 10, 64)
@@ -239,6 +251,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		var body map[string]json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body[s.FailField]; ok {
+			return apiErr{400, "nope"}
+		}
 		s.update(t, body)
 		t.DateUpdated = clickup.FlexString(strconv.FormatInt(time.Now().UnixMilli(), 10))
 		out := *t
@@ -254,11 +269,29 @@ func (s *Server) routes(mux *http.ServeMux) {
 	})
 	handle("POST "+p+"/task/{id}/comment", func(_ http.ResponseWriter, r *http.Request) any {
 		var body struct {
-			Text string `json:"comment_text"`
+			Text  string                `json:"comment_text"`
+			Parts []clickup.CommentPart `json:"comment"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		// Rich comments, the way ClickUp stores them: the parts in order with each mention's
+		// user filled in, and a comment_text that has the mentions at the end.
+		var mentions string
+		if body.Parts != nil {
+			body.Text = ""
+		}
+		for i, part := range body.Parts {
+			if part.Type == "tag" && part.User != nil {
+				name := userByID(part.User.ID).Username
+				body.Parts[i].Text, body.Parts[i].User.Username = "@"+name, name
+				mentions += "@" + name
+			} else {
+				body.Text += part.Text
+			}
+		}
+		body.Text += mentions
+		s.Mentions = slices.Concat(s.Mentions, slices.DeleteFunc(slices.Clone(body.Parts), func(p clickup.CommentPart) bool { return p.Type != "tag" }))
 		id := r.PathValue("id")
-		c := clickup.Comment{ID: clickup.FlexString(fmt.Sprint(len(s.Comments[id]) + 1)), CommentText: body.Text, User: Me,
+		c := clickup.Comment{ID: clickup.FlexString(fmt.Sprint(len(s.Comments[id]) + 1)), CommentText: body.Text, Parts: body.Parts, User: Me,
 			Date: clickup.FlexString(strconv.FormatInt(time.Now().UnixMilli(), 10))}
 		s.Comments[id] = append(s.Comments[id], c)
 		return map[string]any{"id": c.ID}

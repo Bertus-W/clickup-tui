@@ -120,3 +120,24 @@ func TestCanceledRequestsAreMarked(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A POST that fails with a 5xx may still have been saved: retrying it would create the task,
+// comment or time entry twice. GETs are retried.
+func TestPostsAreNotRetried(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := map[string]int{}
+		c := testClient(func(w http.ResponseWriter, r *http.Request) {
+			calls[r.Method]++
+			w.WriteHeader(http.StatusBadGateway)
+		})
+		if _, err := c.CreateTask(t.Context(), "L", map[string]any{"name": "x"}); err == nil {
+			t.Fatal("expected an error")
+		}
+		if _, err := c.GetTask(t.Context(), "t", ""); err == nil {
+			t.Fatal("expected an error")
+		}
+		if calls["POST"] != 1 || calls["GET"] != 4 {
+			t.Fatalf("calls = %v, want 1 POST and 4 GETs", calls)
+		}
+	})
+}

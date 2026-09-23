@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -69,6 +70,11 @@ type Option struct {
 type Prompt struct {
 	Title, Value, Placeholder, Hint string
 	AllowEmpty                      bool // submit "" instead of treating an empty answer as cancel
+	// Check validates the answer before the prompt closes: on an error the prompt stays
+	// open with the message, so a typo can be fixed instead of retyped.
+	Check func(answer string) error
+	// Complete, when set, is what tab does to the text typed so far.
+	Complete func(text string) string
 }
 
 // UI is what the app needs from the terminal. Callbacks run on the UI goroutine and are
@@ -82,6 +88,7 @@ type UI interface {
 	Form(f *Form)
 	Edit(title, initial string, onDone func(string))
 	Notify(level Level, msg string)
+	ShowLatestComment() // scroll the task panel to its newest comment
 	Focus(p Panel)
 	Clipboard(text string) error
 	OpenURL(url string) error
@@ -115,6 +122,7 @@ type App struct {
 	PinnedSel     int
 	IncludeClosed bool
 	Filter        string
+	Group         render.GroupBy // how the task list is grouped
 	Loading       bool
 	SelectedID    string
 	Detail        *clickup.Task
@@ -126,6 +134,9 @@ type App struct {
 
 	selIndex     int
 	seq          map[string]uint64
+	tasksKey     string                      // view the task list was loaded for
+	touch        map[string]uint64           // per task: bumped when an edit starts or ends
+	deleting     map[clickup.FlexString]bool // time entries being deleted
 	busy         atomic.Int32
 	timerRunning atomic.Bool
 }
@@ -137,7 +148,10 @@ func New(api *clickup.Client, c *cache.Cache, ui UI, async Async) *App {
 		Debounce: 150 * time.Millisecond,
 		View:     MyTasks,
 		seq:      map[string]uint64{},
+		touch:    map[string]uint64{},
+		deleting: map[clickup.FlexString]bool{},
 	}
+	a.Group = cache.Value(c, "ui:group", render.ByStatus)
 	api.OnRequest = func(r clickup.RequestLog) { async.UI(func() { a.logRequest(r) }) }
 	return a
 }
@@ -261,7 +275,11 @@ func (a *App) enterDefaultWorkspace() {
 }
 
 func (a *App) EnterWorkspace(teamID string) {
+	// Nothing from the previous workspace may linger: actions would reach its tasks.
 	a.TeamID = teamID
+	a.Tasks, a.Detail, a.Comments, a.SelectedID, a.Filter, a.tasksKey = nil, nil, nil, "", "", ""
+	a.Sheet = Timesheet{}
+	a.setTimer(nil)
 	a.Hierarchy = cache.Value(a.Cache, "hier:"+teamID, []clickup.Space{})
 	a.LastList = nil
 	if l, _, ok := cache.Get[View](a.Cache, "ui:list:"+teamID); ok {
@@ -345,8 +363,11 @@ func (a *App) LoadTasks(quiet bool) {
 	cached, _, hit := cache.Get[[]*clickup.Task](a.Cache, key)
 	// Snapshot now: once handed to the UI, the cached tasks are mutated on this goroutine.
 	cachedJSON, _ := json.Marshal(cached)
-	a.setTasks(cached)
+	sameView := key == a.tasksKey
+	a.tasksKey = key
+	a.setTasks(a.keepLocal(cached, sameView, nil))
 	a.Loading = !hit
+	touched := maps.Clone(a.touch) // tasks edited after this point keep their local state
 	a.run("tasks", func(ctx context.Context, apply func(func())) {
 		pages := a.API.ListTasks(ctx, view.ID, closed)
 		if view.Kind == "my" {
@@ -367,7 +388,7 @@ func (a *App) LoadTasks(quiet bool) {
 			values = append(values, page...)
 			if !hit {
 				partial := pointers(values)
-				apply(func() { a.Loading = false; a.setTasks(partial) })
+				apply(func() { a.Loading = false; a.setTasks(a.keepLocal(partial, true, touched)) })
 			}
 		}
 		freshJSON, _ := json.Marshal(values)
@@ -377,7 +398,7 @@ func (a *App) LoadTasks(quiet bool) {
 		apply(func() {
 			a.Loading = false
 			if changed {
-				a.setTasks(all)
+				a.setTasks(a.keepLocal(all, true, touched))
 			}
 		})
 	})
@@ -390,6 +411,28 @@ func pointers(tasks []clickup.Task) []*clickup.Task {
 		out[i] = &t
 	}
 	return out
+}
+
+// keepLocal adjusts freshly loaded tasks: tasks being created stay (when it's the same view),
+// and tasks edited since the load started keep their local state instead of older data.
+func (a *App) keepLocal(tasks []*clickup.Task, sameView bool, touched map[string]uint64) []*clickup.Task {
+	if touched != nil {
+		for i, t := range tasks {
+			if a.touch[t.ID] != touched[t.ID] {
+				if local := a.find(t.ID); local != nil {
+					tasks[i] = local
+				}
+			}
+		}
+	}
+	if sameView {
+		for _, t := range a.Tasks {
+			if t.Pending && !slices.ContainsFunc(tasks, func(x *clickup.Task) bool { return x.ID == t.ID }) {
+				tasks = append(tasks, t)
+			}
+		}
+	}
+	return tasks
 }
 
 func (a *App) setTasks(tasks []*clickup.Task) {
@@ -424,9 +467,27 @@ func (a *App) persistView() {
 	_ = cache.Put(a.Cache, a.viewKey(), slices.DeleteFunc(slices.Clone(a.Tasks), func(t *clickup.Task) bool { return t.Pending }))
 }
 
-// Rows are the visible tasks in display order, after filtering.
+// Rows are the visible tasks in display order, after grouping and filtering.
 func (a *App) Rows() []render.Row {
-	return slices.DeleteFunc(render.Ordered(a.Tasks), func(r render.Row) bool { return !render.Matches(r.Task, a.Filter) })
+	return slices.DeleteFunc(render.Grouped(a.Tasks, a.Group, a.Now()), func(r render.Row) bool { return !render.Matches(r.Task, a.Filter) })
+}
+
+// SortMenu picks how the task list is sorted, under a heading per group; the choice is remembered.
+func (a *App) SortMenu() {
+	order := []render.GroupBy{render.ByStatus, render.ByAssignee, render.ByPriority, render.ByDue}
+	items := make([]MenuItem, len(order))
+	current := 0
+	for i, g := range order {
+		items[i] = MenuItem{Key: rune('1' + i), Label: render.GroupNames[g], Value: g}
+		if g == a.Group {
+			current = i
+		}
+	}
+	a.UI.Menu("Sort tasks by", items, current, func(item MenuItem) {
+		a.Group = item.Value.(render.GroupBy)
+		_ = cache.Put(a.Cache, "ui:group", a.Group)
+		a.fixSelection()
+	})
 }
 
 // SelectedIndex is the highlighted row, or -1.
@@ -452,6 +513,10 @@ func (a *App) Select(i int) {
 func (a *App) fixSelection() {
 	rows := a.Rows()
 	if len(rows) == 0 {
+		// The filter hides every task: actions must not reach the hidden one still shown.
+		if a.Filter != "" && a.Detail != nil && a.find(a.Detail.ID) == a.Detail {
+			a.Detail, a.Comments, a.SelectedID = nil, nil, ""
+		}
 		return
 	}
 	if i := a.SelectedIndex(); i >= 0 {
@@ -496,7 +561,7 @@ func (a *App) LoadDetail(t *clickup.Task) {
 	if t.Pending {
 		return
 	}
-	id := t.ID
+	id, touched := t.ID, a.touch[t.ID]
 	a.run("detail", func(ctx context.Context, apply func(func())) {
 		if a.Debounce > 0 {
 			select { // debounce while scrolling through the list
@@ -526,8 +591,12 @@ func (a *App) LoadDetail(t *clickup.Task) {
 				target = a.live(t) // a list reload may have replaced the object meanwhile
 			}
 			changed := full.DateUpdated != target.DateUpdated
-			*target = full
-			a.propagate(target)
+			if a.touch[id] == touched { // an edit since the fetch started is newer than this data
+				*target = full
+				a.propagate(target)
+			} else {
+				changed = false
+			}
 			if a.Detail != nil && a.Detail.ID == id {
 				if !slices.Contains(a.Pinned, a.Detail) {
 					a.Detail = target

@@ -114,8 +114,15 @@ func (s *scriptUI) MultiPick(title string, options []app.Option, selected map[st
 	}
 }
 
+// Prompt submits the answer; one its Check refuses is noted and treated as a cancel.
 func (s *scriptUI) Prompt(p app.Prompt, onSubmit func(string)) {
 	if text, ok := s.next(p.Title).(string); ok && (text != "" || p.AllowEmpty) {
+		if p.Check != nil {
+			if err := p.Check(text); err != nil {
+				s.notes = append(s.notes, err.Error())
+				return
+			}
+		}
 		onSubmit(text)
 	}
 }
@@ -143,6 +150,9 @@ func (s *scriptUI) Form(f *app.Form) {
 	for {
 		missing, ok := f.Submit(name)
 		if ok || missing < 0 {
+			if f.Error != "" {
+				s.notes = append(s.notes, f.Error)
+			}
 			return
 		}
 		finished := false
@@ -158,6 +168,7 @@ func (s *scriptUI) Focus(p app.Panel)              { s.focus = p }
 func (s *scriptUI) Clipboard(text string) error    { s.clipboard = text; return nil }
 func (s *scriptUI) OpenURL(string) error           { return nil }
 func (s *scriptUI) Refresh()                       {}
+func (s *scriptUI) ShowLatestComment()             {}
 
 type harness struct {
 	t     *testing.T
@@ -304,7 +315,7 @@ func TestFailedUpdateReverts(t *testing.T) {
 
 func TestPriorityDueAndDescription(t *testing.T) {
 	h := newHarness(t, fake.Basic(5), nil).boot()
-	h.do((*app.App).SetPriority, "urgent")
+	h.do((*app.App).SetPriority, '1')
 	if p := h.fake.Task("t1").Priority; p == nil || p.Priority != "urgent" {
 		t.Fatalf("priority = %+v", p)
 	}
@@ -377,11 +388,11 @@ func TestToggleClosedAndAssignMe(t *testing.T) {
 
 func TestAssignByName(t *testing.T) {
 	h := newHarness(t, fake.Basic(5), nil).boot()
-	h.do((*app.App).Assign, "ali")
+	h.do((*app.App).Assign, []string{"ali"})
 	if got := usernames(h.fake.Task("t1").Assignees); !slices.Equal(got, []string{"tester", "alice"}) {
 		t.Fatalf("assignees = %v", got)
 	}
-	h.do((*app.App).Assign, "test")
+	h.do((*app.App).Assign, []string{"test"})
 	if got := usernames(h.fake.Task("t1").Assignees); !slices.Equal(got, []string{"alice"}) {
 		t.Fatalf("assignees = %v", got)
 	}
@@ -636,30 +647,60 @@ func TestTimesheetGridAndEditing(t *testing.T) {
 		t.Fatalf("days = %v, total = %v, today's column = %d", days, total, h.app.Sheet.Col)
 	}
 
-	// One entry in the cell: type new hours.
-	h.do(func(a *app.App) { a.Sheet.Row, a.Sheet.Col = 1, 1; a.EditCell() }, "0:45")
-	if got := durations(h.fake.Entries); got[2] != "45m0s" {
-		t.Fatalf("durations = %v", got)
+	// enter adds a new entry, also where the day has time: the form starts it right after
+	// the day's last entry, so typing the duration is enough.
+	h.do(func(a *app.App) { a.Sheet.Row, a.Sheet.Col = 1, 1; a.AddToCell() }, "0:45")
+	if rows, _, _ := h.app.SheetRows(); rows[1].Days[1] != 75*time.Minute || len(rows[1].Entries[1]) != 2 {
+		t.Fatalf("Tue for t3 = %v in %d entries", rows[1].Days[1], len(rows[1].Entries[1]))
 	}
-	// Empty cell: log a new entry there, with a start time and a note.
-	h.do(func(a *app.App) { a.Sheet.Col = 2; a.EditCell() }, "1:15 10:00 review")
-	e := h.fake.Entries[len(h.fake.Entries)-1]
-	if !e.StartTime().Equal(at(23, 10, 0)) || e.Description != "review" || e.TaskID() != "t3" {
+	if e := h.fake.Entries[len(h.fake.Entries)-1]; !e.StartTime().Equal(at(22, 10, 30)) || e.TaskID() != "t3" {
 		t.Fatalf("new entry = %+v", e)
 	}
-	// Two entries: pick the second, clear it to delete.
-	h.do(func(a *app.App) { a.Sheet.Row, a.Sheet.Col = 0, 0; a.EditCell() }, '2', "")
-	if n := len(h.fake.Entries); n != 4 || h.fake.Entries[0].Description != "morning" {
-		t.Fatalf("entries = %+v", h.fake.Entries)
+
+	// The form's fields: start, end (setting it recalculates the duration) and note.
+	h.do(func(a *app.App) { a.AddToCell() }, nil) // open the form without saving yet
+	form := h.ui.form
+	if end := style.Strip(form.Rows()[2].Value); !strings.Contains(end, "type a duration") {
+		t.Fatalf("end without a duration = %q", end)
 	}
-	// Moving an entry to another day with a day word keeps its time of day.
-	h.do(func(a *app.App) { a.EditCell() }, "2:00 tue")
-	if e := h.fake.Entries[0]; !e.StartTime().Equal(at(22, 9, 0)) {
+	h.do(func(*app.App) { form.Rows()[1].Edit(func() {}) }, "15:00") // Start
+	h.do(func(*app.App) { form.Rows()[2].Edit(func() {}) }, "16:30") // End
+	h.do(func(*app.App) { form.Rows()[3].Edit(func() {}) }, "retro") // Note
+	if end := style.Strip(form.Rows()[2].Value); form.Name != "1:30" || !strings.HasPrefix(end, "16:30") {
+		t.Fatalf("duration %q, end %q", form.Name, end)
+	}
+	h.do(func(*app.App) { form.Submit(form.Name) })
+	if e := h.fake.Entries[len(h.fake.Entries)-1]; !e.StartTime().Equal(at(22, 15, 0)) || e.Description != "retro" ||
+		time.Duration(e.Duration.Int())*time.Millisecond != 90*time.Minute {
+		t.Fatalf("entry from the form = %+v", e)
+	}
+
+	// e on a day with several entries: pick one, then edit it in the same form…
+	h.do(func(a *app.App) { a.EditCellEntry() }, '1', 'e', "0:40")
+	if got := durations(h.fake.Entries); got[2] != "40m0s" {
+		t.Fatalf("durations = %v", got)
+	}
+	// …or delete it.
+	h.do(func(a *app.App) { a.EditCellEntry() }, '3', 'd', true)
+	if slices.ContainsFunc(h.fake.Entries, func(e clickup.TimeEntry) bool { return e.Description == "retro" }) {
+		t.Fatal("entry not deleted")
+	}
+	// Moving an entry to another day keeps its start time.
+	h.do(func(a *app.App) { a.EditCellEntry() }, '1', 'e', nil)
+	form = h.ui.form
+	h.do(func(*app.App) { form.Rows()[0].Edit(func() {}) }, "wed")
+	h.do(func(*app.App) { form.Submit(form.Name) })
+	if e := h.fake.Entries[2]; !e.StartTime().Equal(at(23, 10, 0)) {
 		t.Fatalf("moved entry starts %v", e.StartTime())
 	}
+	// e on an empty cell explains instead.
+	h.do(func(a *app.App) { a.Sheet.Row, a.Sheet.Col = 1, 4; a.EditCellEntry() })
+	if !strings.Contains(h.ui.notes[len(h.ui.notes)-1], "enter adds") {
+		t.Fatalf("notes = %v", h.ui.notes)
+	}
 	// Clear a cell (confirmed).
-	h.do(func(a *app.App) { a.Sheet.Row, a.Sheet.Col = 0, 1; a.ClearCell() }, true)
-	if slices.ContainsFunc(h.fake.Entries, func(e clickup.TimeEntry) bool { return e.TaskID() == "t1" && e.StartTime().Day() == 22 }) {
+	h.do(func(a *app.App) { a.Sheet.Row, a.Sheet.Col = 0, 0; a.ClearCell() }, true)
+	if slices.ContainsFunc(h.fake.Entries, func(e clickup.TimeEntry) bool { return e.TaskID() == "t1" && e.StartTime().Day() == 21 }) {
 		t.Fatal("cell not cleared")
 	}
 
@@ -682,7 +723,7 @@ func TestTimesheetAddTaskRowAndFailedLogReverts(t *testing.T) {
 		t.Fatalf("rows = %+v, selected %d", rows, h.app.Sheet.Row)
 	}
 	h.fake.FailUpdates = true
-	h.do((*app.App).EditCell, "2h")
+	h.do((*app.App).AddToCell, "2h")
 	if _, _, total := h.app.SheetRows(); total != 3*time.Hour+30*time.Minute {
 		t.Fatalf("failed log wasn't reverted: total %v", total)
 	}
@@ -703,11 +744,225 @@ func TestTimerAndTaskTimeMenu(t *testing.T) {
 	}
 
 	// w lists the task's entries, newest first (the stopped timer, afternoon, morning);
-	// edit the "morning" one.
-	h.do((*app.App).TaskTime, '3', "3:00 08:00 morning standup")
+	// edit the "morning" one: the form keeps its start and note.
+	h.do((*app.App).TaskTime, '3', 'e', "3:00")
 	morning := h.fake.Entries[0]
-	if morning.Description != "morning standup" || !morning.StartTime().Equal(at(21, 8, 0)) ||
+	if morning.Description != "morning" || !morning.StartTime().Equal(at(21, 9, 0)) ||
 		time.Duration(morning.Duration.Int())*time.Millisecond != 3*time.Hour {
 		t.Fatalf("edited entry = %+v", morning)
+	}
+}
+
+// Two edits of one task in flight: the first fails, the second succeeds. Only the first
+// edit's field is reverted.
+func TestFailedEditDoesNotUndoAnotherEdit(t *testing.T) {
+	srv := fake.Basic(5)
+	srv.FailField = "status"
+	h := newHarness(t, srv, nil).boot()
+	h.do((*app.App).SetStatus, nil) // load the list's statuses, so the next picker opens at once
+	h.do(func(a *app.App) {
+		a.SetStatus()   // snapshot taken here, before the priority change…
+		a.SetPriority() // …which is in flight at the same time
+	}, "progress", '1')
+	if s := h.app.Detail.Status.Status; s != "to do" {
+		t.Fatalf("failed status change not reverted: %q", s)
+	}
+	if p := h.app.Detail.Priority; p == nil || p.Priority != "urgent" {
+		t.Fatalf("the successful priority change was undone: %+v", p)
+	}
+	if p := srv.Task("t1").Priority; p == nil || p.Priority != "urgent" {
+		t.Fatalf("server priority = %+v", p)
+	}
+}
+
+// Deleting a task from the pinned panel removes it from the list too.
+func TestDeletePinnedTaskRemovesListCopy(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do((*app.App).TogglePin)
+	h.do(func(a *app.App) { a.SelectPinned(0) })
+	if !slices.Contains(h.app.Pinned, h.app.Detail) {
+		t.Fatal("detail should be the pinned copy")
+	}
+	h.do((*app.App).Delete, true)
+	if slices.Contains(h.rows(), "Task number 1") || len(h.app.Pinned) != 0 {
+		t.Fatalf("rows = %v, pinned = %d", h.rows(), len(h.app.Pinned))
+	}
+	if h.app.Detail != nil && h.app.Detail.ID == "t1" {
+		t.Fatal("the deleted task is still shown")
+	}
+}
+
+// Choosing people twice in the create form keeps everyone chosen.
+func TestNewTaskFormUsersFieldKeepsEveryone(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do(func(a *app.App) { a.OpenView(backlog) })
+	h.do(func(a *app.App) { a.NewTask(false) }, nil)
+	form := h.ui.form
+	reviewer := slices.IndexFunc(form.Rows(), func(r app.FormRow) bool { return r.Label == "Reviewer" })
+	severity := slices.IndexFunc(form.Rows(), func(r app.FormRow) bool { return r.Label == "Severity" })
+	h.do(func(*app.App) { form.Rows()[reviewer].Edit(func() {}) }, []string{"alice"})
+	h.do(func(*app.App) { form.Rows()[reviewer].Edit(func() {}) }, []string{"tester"})
+	h.do(func(*app.App) { form.Rows()[severity].Edit(func() {}) }, '1')
+	h.do(func(*app.App) { form.Submit("Two reviewers") })
+	got := usernames(render.UserValues(new(h.fake.Field(h.app.Detail.ID, "Reviewer"))))
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"alice", "tester"}) {
+		t.Fatalf("reviewers = %v", got)
+	}
+}
+
+// Nothing of one workspace lingers in another.
+func TestWorkspaceSwitchResetsState(t *testing.T) {
+	h := timeHarness(t)
+	h.do((*app.App).OpenTimesheet)
+	h.async.UI(func() {
+		h.app.SetFilter("number")
+		h.app.EnterWorkspace("other")
+		// Checked in the same UI event: nothing has loaded for the new workspace yet.
+		if h.app.Filter != "" || !h.app.Sheet.Week.IsZero() || h.app.Timer != nil || h.app.Detail != nil {
+			t.Errorf("filter %q, sheet week %v, timer %v, detail %v", h.app.Filter, h.app.Sheet.Week, h.app.Timer, h.app.Detail)
+		}
+	})
+	h.async.wg.Wait()
+}
+
+func TestGoToEmptyReference(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do((*app.App).GoTo, "https://app.clickup.com/t/")
+	if !strings.Contains(h.ui.notes[len(h.ui.notes)-1], "doesn't point at a task") || h.app.Detail.ID != "t1" {
+		t.Fatalf("notes = %v, detail %s", h.ui.notes, h.app.Detail.ID)
+	}
+}
+
+// On the last status, space, enter keeps the task where it is instead of reopening it.
+func TestNextStatusDoesNotWrapAround(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do((*app.App).NextStatus, '3') // complete
+	h.do((*app.App).NextStatus, "enter")
+	if got := h.fake.Task("t1").Status.Status; got != "complete" || h.ui.highlighted != 2 {
+		t.Fatalf("status %q, highlighted %d", got, h.ui.highlighted)
+	}
+}
+
+// A filter that hides every task also hides it from actions.
+func TestFilterHidingEverythingClearsTheTask(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do(func(a *app.App) { a.SetFilter("no such task") })
+	if h.app.Detail != nil || h.app.SelectedID != "" {
+		t.Fatalf("detail %v, selected %q", h.app.Detail, h.app.SelectedID)
+	}
+	h.do((*app.App).NextStatus)
+	if note := h.ui.notes[len(h.ui.notes)-1]; note != "No task selected" {
+		t.Fatalf("note = %q", note)
+	}
+	h.do(func(a *app.App) { a.SetFilter("") })
+	if h.app.Detail == nil || h.app.Detail.ID != "t1" {
+		t.Fatalf("clearing the filter should select again: %v", h.app.Detail)
+	}
+}
+
+// a says which way it toggled.
+func TestAssignMeSaysWhatHappened(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do((*app.App).AssignMe)
+	if note := h.ui.notes[len(h.ui.notes)-1]; note != "Unassigned you from DEV-1" {
+		t.Fatalf("note = %q", note)
+	}
+	h.do((*app.App).AssignMe)
+	if note := h.ui.notes[len(h.ui.notes)-1]; note != "Assigned you to DEV-1" {
+		t.Fatalf("note = %q", note)
+	}
+}
+
+// L logs through the entry form; its input takes the one-line form too.
+func TestLogTimeFormTakesOneLine(t *testing.T) {
+	h := timeHarness(t)
+	h.do((*app.App).LogTime, "1h 13:00 yesterday pairing")
+	e := h.fake.Entries[len(h.fake.Entries)-1]
+	yesterday := time.Date(2026, 9, 22, 13, 0, 0, 0, time.Local)
+	if !e.StartTime().Equal(yesterday) || e.Description != "pairing" || e.Duration.Int() != time.Hour.Milliseconds() {
+		t.Fatalf("entry %v %q %s", e.StartTime(), e.Description, e.Duration)
+	}
+	h.do((*app.App).LogTime, "tomorrow")
+	if note := h.ui.notes[len(h.ui.notes)-1]; !strings.Contains(note, "start with a duration") {
+		t.Fatalf("note = %q", note)
+	}
+}
+
+// Rows added to the timesheet stay with their week; tasks outside the offered ones can be
+// added by id.
+func TestTimesheetRowsByIDStayWithTheirWeek(t *testing.T) {
+	h := timeHarness(t)
+	h.do((*app.App).OpenTimesheet)
+	h.do((*app.App).AddSheetTask, "another task", "DEV-4")
+	rows, _, _ := h.app.SheetRows()
+	if rows[h.app.Sheet.Row].TaskID != "t4" {
+		t.Fatalf("rows = %+v", rows)
+	}
+	n := len(rows)
+	h.do(func(a *app.App) { a.ShiftWeek(1) })
+	if rows, _, _ := h.app.SheetRows(); len(rows) != 0 {
+		t.Fatalf("next week has rows: %+v", rows)
+	}
+	h.do(func(a *app.App) { a.ShiftWeek(-1) })
+	if rows, _, _ := h.app.SheetRows(); len(rows) != n {
+		t.Fatalf("back on the week: %d rows, want %d", len(rows), n)
+	}
+}
+
+func TestSortBy(t *testing.T) {
+	srv := fake.Basic(5)
+	srv.Tasks["t3"].Priority = &clickup.Priority{ID: "1", Priority: "urgent"}
+	srv.Tasks["t5"].Priority = &clickup.Priority{ID: "3", Priority: "normal"}
+	h := newHarness(t, srv, nil).boot()
+	h.do((*app.App).SortMenu, '3') // priority
+	if got, want := h.rows(), []string{"Task number 3", "Task number 5", "Task number 1"}; !slices.Equal(got, want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	if g := h.app.Rows()[2].Group; style.Strip(g.Label) != "No priority" {
+		t.Fatalf("group = %+v", g)
+	}
+	// Remembered for the next start.
+	if h2 := newHarness(t, srv, h.app.Cache); h2.app.Group != render.ByPriority {
+		t.Fatalf("group after restart = %q", h2.app.Group)
+	}
+}
+
+// m moves a task to another list: it leaves the list at once, and comes back if that fails.
+func TestMoveTask(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do(func(a *app.App) { a.OpenView(backlog) })
+	h.fake.FailUpdates = true
+	h.do((*app.App).MoveTask, "Inbox")
+	if len(h.rows()) != 5 || h.fake.Task("t1").List.ID != fake.ListID {
+		t.Fatalf("failed move: rows %v, list %s", h.rows(), h.fake.Task("t1").List.ID)
+	}
+	h.fake.FailUpdates = false
+	h.do((*app.App).MoveTask, "Inbox")
+	if got := h.fake.Task("t1").List.ID; got != "L2" {
+		t.Fatalf("server list = %s", got)
+	}
+	if slices.Contains(h.rows(), "Task number 1") || h.app.Detail.ID == "t1" {
+		t.Fatalf("moved task still in the list: %v, detail %s", h.rows(), h.app.Detail.ID)
+	}
+	h.do(func(a *app.App) { a.OpenView(app.View{Kind: "list", ID: "L2", Name: "Inbox"}) })
+	if got := h.rows(); !slices.Equal(got, []string{"Task number 1"}) {
+		t.Fatalf("Inbox rows = %v", got)
+	}
+}
+
+// Comments tag the members they @mention.
+func TestCommentMentions(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do((*app.App).Comment, "@alice can you look?")
+	if len(h.fake.Mentions) != 1 || h.fake.Mentions[0].User.ID != fake.Other.ID {
+		t.Fatalf("mentions = %+v", h.fake.Mentions)
+	}
+	// ClickUp's comment_text puts mentions last; the comment reads as written anyway.
+	if c := h.app.Comments[len(h.app.Comments)-1]; c.Text() != "@alice can you look?" || c.CommentText != " can you look?@alice" {
+		t.Fatalf("comment = %q (comment_text %q)", c.Text(), c.CommentText)
+	}
+	if note := h.ui.notes[len(h.ui.notes)-1]; note != "Comment posted on DEV-1" {
+		t.Fatalf("note = %q", note)
 	}
 }

@@ -29,21 +29,26 @@ func do(fn func()) func() error { return func() error { fn(); return nil } }
 func (gui *Gui) keymap() []binding {
 	a := func(fn func(*app.App)) func() error { return func() error { fn(gui.App); return nil } }
 	return []binding{
-		// Task actions: available on the task list and the task panel.
-		{taskViews, []any{gocui.KeySpace}, "Next status", true, false, a((*app.App).NextStatus)},
-		{taskViews, []any{'s'}, "Find status", false, false, a((*app.App).SetStatus)},
+		// The hint line shows the short ones in this order, as far as they fit.
+		{taskViews, []any{gocui.KeySpace}, "Status", true, false, a((*app.App).NextStatus)},
+		{[]string{viewTasks}, []any{'/'}, "Filter", true, false, do(gui.startFilter)},
+		{[]string{viewTasks, viewPinned}, []any{gocui.KeyEnter}, "View", true, false, do(func() { gui.focus(viewDetail) })},
 		{taskViews, []any{'f'}, "Fields", true, false, a((*app.App).EditField)},
 		{taskViews, []any{'L'}, "Log time", true, false, a((*app.App).LogTime)},
+		{taskViews, []any{'A'}, "Assign", true, false, a((*app.App).Assign)},
+		{taskViews, []any{'n'}, "New task", true, false, a(func(x *app.App) { x.NewTask(false) })},
+		{taskViews, []any{'P'}, "Pin", true, false, a((*app.App).TogglePin)},
+		{taskViews, []any{'c'}, "Comment", true, false, a((*app.App).Comment)},
+		{taskViews, []any{'e'}, "Edit description", true, false, a((*app.App).EditDescription)},
+
+		// Task actions: available on the task list and the task panel.
+		{taskViews, []any{'s'}, "Find status", false, false, a((*app.App).SetStatus)},
 		{taskViews, []any{'T'}, "Start/stop timer", false, false, a((*app.App).ToggleTimer)},
 		{taskViews, []any{'w'}, "Time entries", false, false, a((*app.App).TaskTime)},
-		{taskViews, []any{'P'}, "Pin/unpin", true, false, a((*app.App).TogglePin)},
-		{taskViews, []any{'A'}, "Assign", true, false, a((*app.App).Assign)},
-		{taskViews, []any{'a'}, "Assign me", false, false, a((*app.App).AssignMe)},
-		{taskViews, []any{'n'}, "New task", true, false, a(func(x *app.App) { x.NewTask(false) })},
+		{taskViews, []any{'a'}, "Assign/unassign me", false, false, a((*app.App).AssignMe)},
 		{taskViews, []any{'N'}, "New subtask", false, false, a(func(x *app.App) { x.NewTask(true) })},
-		{taskViews, []any{'e'}, "Edit description", true, false, a((*app.App).EditDescription)},
 		{taskViews, []any{'r'}, "Rename", false, false, a((*app.App).Rename)},
-		{taskViews, []any{'c'}, "Comment", true, false, a((*app.App).Comment)},
+		{taskViews, []any{'m'}, "Move to list", false, false, a((*app.App).MoveTask)},
 		{taskViews, []any{'C'}, "Comment in $EDITOR", false, false, a((*app.App).CommentInEditor)},
 		{taskViews, []any{'p'}, "Priority", false, false, a((*app.App).SetPriority)},
 		{taskViews, []any{'t'}, "Due date", false, false, a((*app.App).SetDue)},
@@ -52,11 +57,10 @@ func (gui *Gui) keymap() []binding {
 		{taskViews, []any{'y'}, "Copy…", false, false, a((*app.App).CopyMenu)},
 
 		// Task list.
-		{[]string{viewTasks}, []any{'/'}, "Filter", true, false, do(gui.startFilter)},
 		{[]string{viewTasks}, []any{gocui.KeyEsc}, "Clear filter", false, false, do(func() { gui.App.SetFilter("") })},
 		{[]string{viewTasks}, []any{'v'}, "Show closed", false, false, a((*app.App).ToggleClosed)},
+		{[]string{viewTasks}, []any{'S'}, "Sort by…", false, false, a((*app.App).SortMenu)},
 		{[]string{viewTasks}, []any{'[', ']'}, "Switch tab (list ↔ mine)", false, false, a((*app.App).SwitchTab)},
-		{[]string{viewTasks}, []any{gocui.KeyEnter}, "View task", false, false, do(func() { gui.focus(viewDetail) })},
 		{[]string{viewTasks}, []any{'j', gocui.KeyArrowDown}, "Down", false, true, do(func() { gui.moveTask(1) })},
 		{[]string{viewTasks}, []any{'k', gocui.KeyArrowUp}, "Up", false, true, do(func() { gui.moveTask(-1) })},
 		{[]string{viewTasks}, []any{',', gocui.KeyPgup}, "Previous page", false, true, do(func() { gui.moveTask(-gui.pageSize(viewTasks)) })},
@@ -70,7 +74,6 @@ func (gui *Gui) keymap() []binding {
 		{[]string{viewDetail}, []any{gocui.KeyEsc}, "Back to the list", false, true, do(func() { gui.focus(gui.lastList) })},
 
 		// Pinned.
-		{[]string{viewPinned}, []any{gocui.KeyEnter}, "View task", false, false, do(func() { gui.focus(viewDetail) })},
 		{[]string{viewPinned}, []any{'j', gocui.KeyArrowDown}, "Down", false, true, do(func() { gui.App.SelectPinned(gui.App.PinnedSel + 1) })},
 		{[]string{viewPinned}, []any{'k', gocui.KeyArrowUp}, "Up", false, true, do(func() { gui.App.SelectPinned(gui.App.PinnedSel - 1) })},
 
@@ -84,8 +87,11 @@ func (gui *Gui) keymap() []binding {
 		// Workspace.
 		{[]string{viewStatus}, []any{gocui.KeyEnter}, "Switch workspace", true, false, a((*app.App).SwitchWorkspace)},
 
+		// Pages. The tab bar shows the keys, so they stay out of the hint line. Back to the
+		// tasks is esc on the timesheet (sheetKeys), so ? doesn't offer the page you're on.
+		{panels, []any{'H', gocui.KeyF2}, "Timesheet page (hours)", false, false, do(func() { gui.showPage(pageTimesheet) })},
+
 		// Global.
-		{panels, []any{'W'}, "Timesheet", true, false, do(gui.openSheet)},
 		{panels, []any{'g'}, "Go to task by id/URL", false, false, a((*app.App).GoTo)},
 		{panels, []any{gocui.KeyCtrlP}, "Jump to list", false, false, a((*app.App).JumpToList)},
 		{panels, []any{'R'}, "Refresh", false, false, a((*app.App).Refresh)},
@@ -224,8 +230,8 @@ func (gui *Gui) active() []binding {
 // dropping hints from the end to fit width while always keeping the keybindings hint.
 func (gui *Gui) hints(width int) string {
 	var parts []string
-	for _, b := range gui.active() {
-		if b.short {
+	for _, b := range gui.bindings { // in keymap order: the keymap decides what comes first
+		if b.short && slices.Contains(b.views, gui.panel) {
 			parts = append(parts, b.desc+": "+keyName(b.keys[0]))
 		}
 	}
@@ -249,7 +255,7 @@ func (gui *Gui) keybindingsMenu() {
 		labels = append(labels, keyName(b.keys[0]))
 	}
 	gui.open(&popup{kind: popupMenu, title: "Keybindings", items: items, keyLabels: labels,
-		onMenu: func(item app.MenuItem) { _ = item.Value.(func() error)() }})
+		onMenu: func(item app.MenuItem) { gui.menuErr = item.Value.(func() error)() }})
 }
 
 // --- panel handlers -------------------------------------------------------------------------------

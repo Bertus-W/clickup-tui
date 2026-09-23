@@ -21,7 +21,7 @@ func (gui *Gui) mouseMap() map[viewKey]mouseHandler {
 		},
 		{viewLists, gocui.MouseLeft}: func(o gocui.ViewMouseBindingOpts) error {
 			gui.focus(viewLists)
-			if o.Y < len(gui.tree) {
+			if o.Y >= 0 && o.Y < len(gui.tree) { // Y is -1 on the title border
 				gui.treeSel = o.Y
 				if o.IsDoubleClick || gui.tree[o.Y].branch {
 					gui.openTreeLine() // a branch toggles on a single click, like a tree should
@@ -31,8 +31,8 @@ func (gui *Gui) mouseMap() map[viewKey]mouseHandler {
 		},
 		{viewTasks, gocui.MouseLeft}: func(o gocui.ViewMouseBindingOpts) error {
 			gui.focus(viewTasks)
-			if o.Y < len(gui.App.Rows()) {
-				gui.App.Select(o.Y)
+			if o.Y >= 0 && o.Y < len(gui.taskLines) && gui.taskLines[o.Y] >= 0 { // not on a heading
+				gui.App.Select(gui.taskLines[o.Y])
 				if o.IsDoubleClick {
 					gui.focus(viewDetail)
 				}
@@ -41,7 +41,7 @@ func (gui *Gui) mouseMap() map[viewKey]mouseHandler {
 		},
 		{viewPinned, gocui.MouseLeft}: func(o gocui.ViewMouseBindingOpts) error {
 			gui.focus(viewPinned)
-			if o.Y < len(gui.App.Pinned) {
+			if o.Y >= 0 && o.Y < len(gui.App.Pinned) {
 				gui.App.SelectPinned(o.Y)
 				if o.IsDoubleClick {
 					gui.focus(viewDetail)
@@ -67,7 +67,7 @@ func (gui *Gui) mouseMap() map[viewKey]mouseHandler {
 				if col := render.SheetColumnAt(width, o.X); col >= 0 {
 					gui.App.Sheet.Col = col
 					if o.IsDoubleClick {
-						gui.App.EditCell()
+						gui.App.AddToCell()
 					}
 				}
 			}
@@ -87,10 +87,15 @@ func (gui *Gui) mouseMap() map[viewKey]mouseHandler {
 
 		{viewPopup, gocui.MouseLeft}: func(o gocui.ViewMouseBindingOpts) error {
 			p := gui.popup
-			if p == nil || p.kind == popupConfirm || o.Y >= p.count() {
+			if p == nil || p.kind == popupConfirm || p.kind == popupInfo || o.Y < 0 || o.Y >= p.count() {
 				return nil
 			}
 			p.sel = o.Y
+			if p.kind == popupForm { // clicking a property edits it
+				p.inList = true
+				gui.formEdit(o.Y)
+				return nil
+			}
 			if p.kind == popupMulti {
 				return gui.popupRune(' ') // toggle; enter still finishes
 			}
@@ -98,6 +103,7 @@ func (gui *Gui) mouseMap() map[viewKey]mouseHandler {
 		},
 		{viewPopup, gocui.MouseWheelDown}: func(gocui.ViewMouseBindingOpts) error { gui.popup.move(1); return nil },
 		{viewPopup, gocui.MouseWheelUp}:   func(gocui.ViewMouseBindingOpts) error { gui.popup.move(-1); return nil },
+		{viewPages, gocui.MouseLeft}:      gui.pageClick,
 	}
 }
 

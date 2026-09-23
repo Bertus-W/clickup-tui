@@ -18,7 +18,7 @@ const (
 	viewSheetSide = "sheetSide"
 )
 
-// The timesheet is a page of its own (W), like ClickUp's web Timesheet: a week of my time
+// The timesheet is a page of its own (T), like ClickUp's web Timesheet: a week of my time
 // per task and day, with the entries behind the selected cell on the right.
 
 func (gui *Gui) openSheet() {
@@ -38,14 +38,15 @@ func (gui *Gui) sheetKeys() []binding {
 	a := func(fn func(*app.App)) func() error { return func() error { fn(gui.App); return nil } }
 	sheet := []string{viewSheet}
 	return []binding{
-		{sheet, []any{gocui.KeyEnter}, "Edit hours", true, false, a((*app.App).EditCell)},
-		{sheet, []any{'a'}, "Add task", true, false, a((*app.App).AddSheetTask)},
-		{sheet, []any{'d'}, "Delete", true, false, a((*app.App).ClearCell)},
+		{sheet, []any{gocui.KeyEnter}, "Add time", true, false, a((*app.App).AddToCell)},
+		{sheet, []any{'e'}, "Edit/delete entry", true, false, a((*app.App).EditCellEntry)},
+		{sheet, []any{'n'}, "Add task row", true, false, a((*app.App).AddSheetTask)},
+		{sheet, []any{'d'}, "Clear day", false, false, a((*app.App).ClearCell)},
 		{sheet, []any{'['}, "Previous week", true, false, a(func(x *app.App) { x.ShiftWeek(-1) })},
 		{sheet, []any{']'}, "Next week", true, false, a(func(x *app.App) { x.ShiftWeek(1) })},
-		{sheet, []any{'t'}, "This week", false, false, a(func(x *app.App) { x.ShiftWeek(0) })},
+		{sheet, []any{'w'}, "This week", false, false, a(func(x *app.App) { x.ShiftWeek(0) })},
 		{sheet, []any{'R'}, "Refresh", false, false, a((*app.App).LoadWeek)},
-		{sheet, []any{gocui.KeyEsc, 'W'}, "Back", true, false, do(gui.closeSheet)},
+		{sheet, []any{gocui.KeyEsc, gocui.KeyF1}, "Back to tasks", true, false, do(gui.closeSheet)},
 		{sheet, []any{'h', gocui.KeyArrowLeft}, "Previous day", false, true, a(func(x *app.App) { x.SheetMove(0, -1) })},
 		{sheet, []any{'l', gocui.KeyArrowRight}, "Next day", false, true, a(func(x *app.App) { x.SheetMove(0, 1) })},
 		{sheet, []any{'k', gocui.KeyArrowUp}, "Previous task", false, true, a(func(x *app.App) { x.SheetMove(-1, 0) })},
@@ -62,15 +63,20 @@ func (gui *Gui) layoutSheet(maxX, maxY int) error {
 			v.Visible = false
 		}
 	}
+	// The grid needs about 80 columns; below 120 the side panel makes way for it.
 	sideW := min(60, maxX*38/100)
-	v, err := gui.view(viewSheet, 0, 0, maxX-sideW-1, bottom)
+	if maxX < 120 {
+		sideW = 0
+	}
+	v, err := gui.view(viewSheet, 0, pageTop, maxX-sideW-1, bottom)
 	if err != nil {
 		return err
 	}
-	side, err := gui.view(viewSheetSide, maxX-sideW, 0, maxX-1, bottom)
+	side, err := gui.view(viewSheetSide, max(maxX-sideW, 0), pageTop, maxX-1, bottom)
 	if err != nil {
 		return err
 	}
+	side.Visible = sideW > 0
 	v.HighlightInactive = gui.popup != nil
 	gui.renderSheet(v)
 	gui.renderSheetSide(side)
@@ -91,9 +97,11 @@ func (gui *Gui) renderSheet(v *gocui.View) {
 	case len(rows) == 0 && a.Sheet.Loading:
 		content = append(content, style.Dim("loading…"))
 	case len(rows) == 0:
-		content = append(content, style.Dim("No time logged this week. a adds a task row; L on a task in the main view logs time."))
+		content = append(content, style.Dim("No time logged this week. n adds a task row; L on a task in the main view logs time."))
 	default:
-		lines[a.Sheet.Row] = style.Strip(lines[a.Sheet.Row]) // plain text reads best on the selection bar
+		if a.Sheet.Row < len(lines) {
+			lines[a.Sheet.Row] = style.Strip(lines[a.Sheet.Row]) // plain text reads best on the selection bar
+		}
 		content = append(content, lines...)
 	}
 	content = append(content, "", footer)
@@ -117,7 +125,7 @@ func (gui *Gui) renderSheetSide(v *gocui.View) {
 		lines = append(lines, "")
 		entries := a.SelectedEntries()
 		if len(entries) == 0 {
-			lines = append(lines, style.Dim("No time on this day. enter logs some."))
+			lines = append(lines, style.Dim("No time on this day. enter adds some."))
 		}
 		for _, e := range entries {
 			lines = append(lines, render.EntryLine(e, a.Now(), false))
@@ -127,9 +135,9 @@ func (gui *Gui) renderSheetSide(v *gocui.View) {
 	if t := a.TimerLine(); t != "" {
 		lines = append(lines, "", t)
 	}
-	lines = append(lines, "", style.Dim("enter hours like 1:30, 1h30, 90m or 1.5;"),
-		style.Dim("add a start time and a note: 1:30 09:00 review."),
-		style.Dim("empty or 0 deletes."))
+	lines = append(lines, "", style.Dim("enter adds an entry to this day: type the duration;"),
+		style.Dim("↓ reaches the start, end and note."),
+		style.Dim("e edits or deletes one of this day's entries."))
 	write(v, lines)
 }
 

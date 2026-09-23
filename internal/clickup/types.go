@@ -4,7 +4,9 @@ package clickup
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 // FlexString decodes JSON strings, numbers and null alike; ClickUp is inconsistent about ids and timestamps.
@@ -95,11 +97,11 @@ type Ref struct {
 }
 
 type Option struct {
-	ID         string    `json:"id"`
+	ID         string    `json:"id,omitzero"` // omitted when creating a field
 	Name       string    `json:"name,omitzero"`
 	Label      string    `json:"label,omitzero"` // labels fields use "label" instead of "name"
 	Color      string    `json:"color,omitzero"`
-	OrderIndex FlexFloat `json:"orderindex"`
+	OrderIndex FlexFloat `json:"orderindex,omitzero"`
 }
 
 // Title is the option's display name, whichever key ClickUp used.
@@ -184,11 +186,43 @@ func (t *Task) Field(id string) (*CustomField, bool) {
 }
 
 type Comment struct {
-	ID          FlexString `json:"id"`
-	CommentText string     `json:"comment_text"`
-	User        User       `json:"user"`
-	Date        FlexString `json:"date"`
-	Pending     bool       `json:"-"`
+	ID          FlexString    `json:"id"`
+	CommentText string        `json:"comment_text"` // mentions come last here, see Text
+	Parts       []CommentPart `json:"comment,omitzero"`
+	User        User          `json:"user"`
+	Date        FlexString    `json:"date"`
+	Pending     bool          `json:"-"`
+}
+
+// CommentPart is one piece of a rich comment: text, or a mention (Type "tag") of a user.
+type CommentPart struct {
+	Text string       `json:"text,omitempty"`
+	Type string       `json:"type,omitempty"`
+	User *CommentUser `json:"user,omitempty"`
+}
+
+type CommentUser struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username,omitempty"`
+}
+
+// Text is the comment as written. ClickUp's comment_text moves @mentions to the end, so a
+// comment with mentions is rebuilt from its parts, which keep them in place. Right after
+// posting, ClickUp may not have resolved a mention yet (a bare {"type":"tag"}): then the
+// comment_text is all there is.
+func (c Comment) Text() string {
+	if !slices.ContainsFunc(c.Parts, func(p CommentPart) bool { return p.Type == "tag" }) ||
+		slices.ContainsFunc(c.Parts, func(p CommentPart) bool { return p.Type == "tag" && p.Text == "" && p.User == nil }) {
+		return c.CommentText
+	}
+	var b strings.Builder
+	for _, p := range c.Parts {
+		if p.Type == "tag" && p.Text == "" && p.User != nil {
+			p.Text = "@" + p.User.Username
+		}
+		b.WriteString(p.Text)
+	}
+	return b.String()
 }
 
 type List struct {

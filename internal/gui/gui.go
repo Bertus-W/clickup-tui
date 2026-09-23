@@ -73,9 +73,13 @@ type Gui struct {
 	filtering    bool
 	filterFilled bool
 	popup        *popup
-	returnTo     *popup // a form waiting for one of its property editors to close
-	sheetOpen    bool   // the timesheet page replaces the panels
-	sheetPrev    string // panel to return to when it closes
+	returnTo     *popup   // a form waiting for one of its property editors to close
+	sheetOpen    bool     // the timesheet page replaces the panels
+	pageTabs     [][2]int // x ranges of the page tabs, for clicks
+	queued       []*popup // popups waiting for the open one to close
+	editingRow   bool     // a form row's editor is opening
+	menuErr      error    // from an action run via the keybindings menu (e.g. quit)
+	sheetPrev    string   // panel to return to when it closes
 	bindings     []binding
 
 	tree        []treeLine
@@ -83,6 +87,8 @@ type Gui struct {
 	expanded    map[string]bool
 	treeOpened  bool
 	shownDetail string
+	taskLines   []int // per line of the task list: its row, or -1 for a group heading
+	detailToEnd bool  // scroll the task panel to the bottom on the next render
 
 	toast      string
 	toastLevel app.Level
@@ -205,20 +211,27 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 
 	type box struct{ x0, y0, x1, y1 int }
 	boxes := map[string]box{}
+	top := pageTop
 	if gui.mode == modeFull {
-		boxes[gui.panel] = box{0, 0, maxX - 1, bottom}
+		boxes[gui.panel] = box{0, top, maxX - 1, bottom}
 	} else {
+		// On short terminals the task list keeps at least 3 rows; lists and pins shrink first.
+		avail := bottom - top + 1
 		pinnedH := min(max(len(gui.App.Pinned), 1), 8) + 2
-		listsH := max(5, (bottom-4-pinnedH)/3)
-		boxes[viewStatus] = box{0, 0, leftW - 1, 3}
-		boxes[viewLists] = box{0, 4, leftW - 1, 4 + listsH - 1}
-		boxes[viewTasks] = box{0, 4 + listsH, leftW - 1, bottom - pinnedH}
+		listsH := max(5, (avail-4-pinnedH)/3)
+		if short := 4 + listsH + pinnedH + 3 - avail; short > 0 {
+			listsH = max(3, listsH-short)
+			pinnedH = max(3, pinnedH-(4+listsH+pinnedH+3-avail))
+		}
+		boxes[viewStatus] = box{0, top, leftW - 1, top + 3}
+		boxes[viewLists] = box{0, top + 4, leftW - 1, top + 4 + listsH - 1}
+		boxes[viewTasks] = box{0, top + 4 + listsH, leftW - 1, bottom - pinnedH}
 		boxes[viewPinned] = box{0, bottom - pinnedH + 1, leftW - 1, bottom}
 		logH := 0
 		if gui.showLog {
-			logH = min(9, bottom/3)
+			logH = min(9, (bottom-top)/3)
 		}
-		boxes[viewDetail] = box{leftW, 0, maxX - 1, bottom - logH}
+		boxes[viewDetail] = box{leftW, top, maxX - 1, bottom - logH}
 		if logH > 0 {
 			boxes[viewLog] = box{leftW, bottom - logH + 1, maxX - 1, bottom}
 		}
@@ -252,6 +265,11 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 
 // finishLayout draws the hint line and any popup, and puts the focus where it belongs.
 func (gui *Gui) finishLayout(g *gocui.Gui, maxX, maxY int) error {
+	gui.openQueued()
+	g.Cursor = gui.filtering // layoutPopup turns it on for inputs
+	if err := gui.renderPages(maxX); err != nil {
+		return err
+	}
 	if err := gui.renderBottom(maxX, maxY); err != nil {
 		return err
 	}
@@ -263,10 +281,8 @@ func (gui *Gui) finishLayout(g *gocui.Gui, maxX, maxY int) error {
 		if gui.filtering {
 			name = viewFilter
 		}
-		if cur := g.CurrentView(); cur == nil || cur.Name() != name {
-			if _, err := g.SetCurrentView(name); err != nil {
-				return err
-			}
+		if err := gui.setCurrent(name); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -317,7 +333,7 @@ func (gui *Gui) initView(v *gocui.View) {
 	case viewLog:
 		v.Title = "Command log"
 		v.Autoscroll = true
-	case viewOptions, viewInfo:
+	case viewOptions, viewInfo, viewPages:
 		v.Frame = false
 	case viewFilter:
 		v.Frame = false
@@ -328,8 +344,7 @@ func (gui *Gui) initView(v *gocui.View) {
 	case viewSheetSide:
 		v.Wrap = true
 	case viewPopup:
-		v.Highlight = true
-		v.Wrap = true
+		v.Highlight = true // no wrapping: rows must match items for the cursor and clicks
 	case viewPopupInput:
 		v.Editable = true
 		v.Editor = gocui.EditorFunc(gui.editPopupInput)
@@ -351,9 +366,6 @@ func (gui *Gui) renderStatus() {
 		check = style.Green("✓ ")
 	}
 	line1 := check + style.Bold(cmp.Or(a.Team().Name, "…")) + " → " + style.Cyan(cmp.Or(a.Me.Username, "…"))
-	if timer := a.TimerLine(); timer != "" {
-		line1 += "   " + timer
-	}
 	line2 := style.Dim("cached")
 	switch {
 	case a.Busy():
@@ -467,26 +479,48 @@ func (gui *Gui) renderTasks() {
 	width, _ := v.InnerSize()
 	table := render.NewTable(a.Tasks, width, a.View.Kind == "my")
 	now := a.Now()
-	lines := make([]string, len(rows))
+	// Rows under a heading per group, like ClickUp's list view.
+	counts := map[string]int{}
+	for _, r := range rows {
+		counts[r.Group.Key]++
+	}
+	var lines []string
+	gui.taskLines = gui.taskLines[:0]
+	lineOf := make([]int, len(rows))
 	for i, r := range rows {
-		lines[i] = table.Line(r, now)
+		if i == 0 || r.Group.Key != rows[i-1].Group.Key {
+			if i > 0 {
+				lines = append(lines, "")
+				gui.taskLines = append(gui.taskLines, -1)
+			}
+			lines = append(lines, render.Heading(r.Group, counts[r.Group.Key]))
+			gui.taskLines = append(gui.taskLines, -1)
+		}
+		lineOf[i] = len(lines)
+		lines = append(lines, table.Line(r, now))
+		gui.taskLines = append(gui.taskLines, i)
 	}
 	if len(rows) == 0 {
 		switch {
 		case a.Loading:
 			lines = []string{style.Dim("loading…")}
 		case a.Filter != "":
-			lines = []string{style.Dim("no tasks match the filter")}
+			lines = []string{style.Dim("no tasks match “" + a.Filter + "” · esc clears the filter")}
 		default:
 			lines = []string{style.Dim("no tasks")}
 		}
 	}
 	sel := max(a.SelectedIndex(), 0)
+	line := 0
 	if len(rows) > 0 {
-		lines[sel] = style.Strip(lines[sel]) // plain text reads best on the selection bar
+		line = lineOf[sel]
+		lines[line] = style.Strip(lines[line]) // plain text reads best on the selection bar
 	}
 	write(v, lines)
-	v.FocusPoint(0, sel, true)
+	v.FocusPoint(0, line, true)
+	if _, h := v.InnerSize(); line < h {
+		v.SetOriginY(0) // keep the first heading in view
+	}
 	v.Footer = ""
 	if len(rows) > 0 {
 		v.Footer = fmt.Sprintf("%d of %d", sel+1, len(rows))
@@ -529,7 +563,14 @@ func (gui *Gui) renderDetail() {
 	}
 	v.Subtitle = t.Label()
 	write(v, strings.Split(render.Detail(t, gui.App.Comments, gui.App.Now()), "\n"))
+	if gui.detailToEnd {
+		gui.detailToEnd = false
+		v.SetOriginY(max(v.ViewLinesHeight()-v.InnerHeight(), 0))
+	}
 }
+
+// ShowLatestComment scrolls the task panel down to the newest comment (they're at the end).
+func (gui *Gui) ShowLatestComment() { gui.detailToEnd = true }
 
 func (gui *Gui) renderLog() {
 	v, _ := gui.g.View(viewLog)
@@ -593,10 +634,15 @@ func (gui *Gui) renderBottom(maxX, maxY int) error {
 // --- focus and screen modes -------------------------------------------------------------------
 
 func (gui *Gui) Focus(p app.Panel) {
-	gui.focus(map[app.Panel]string{
+	name := map[app.Panel]string{
 		app.PanelWorkspace: viewStatus, app.PanelLists: viewLists, app.PanelTasks: viewTasks,
 		app.PanelPinned: viewPinned, app.PanelDetail: viewDetail,
-	}[p])
+	}[p]
+	if gui.sheetOpen { // e.g. a go-to finishing while you're on the timesheet: go there on return
+		gui.sheetPrev = name
+		return
+	}
+	gui.focus(name)
 }
 
 // focus moves to a panel; the task panel follows whichever task list you're in.

@@ -73,3 +73,23 @@ func TestMarkdownSubset(t *testing.T) {
 		t.Fatalf("markdown = %q, want %q", out, want)
 	}
 }
+
+func TestMarkdownBlocksAndSpans(t *testing.T) {
+	md := "- [ ] open item\n- [x] done item\n1. first\n> quoted\n---\n" +
+		"see [the docs](https://example.com/docs) or https://x.test/a, *soft* and _also_, ~~gone~~, ask @alice\n" +
+		"snake_case_name and a*b*c stay as written"
+	out := Markdown(md)
+	plain := style.Strip(out)
+	for _, want := range []string{"[ ] open item", "[✓] done item", "1. first", "│ quoted", "────",
+		"the docs (https://example.com/docs)", "snake_case_name and a*b*c stay as written"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("missing %q in:\n%s", want, plain)
+		}
+	}
+	for _, want := range []string{style.Italic("soft"), style.Italic("also"), style.Strike("gone"), style.BoldCyan("@alice"),
+		style.Cyan("https://x.test/a")} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing styled %q", style.Strip(want))
+		}
+	}
+}

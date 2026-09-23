@@ -90,7 +90,7 @@ func WeekStart(t time.Time) time.Time {
 
 // SheetLines renders the grid: a header, one line per task and a totals line. The selected
 // cell is bracketed, today's column is highlighted.
-func sheetNameWidth(width int) int { return max(16, width-8*(sheetCell+1)-2) }
+func sheetNameWidth(width int) int { return max(12, width-8*(sheetCell+1)-2) }
 
 // SheetColumnAt is the day column (0–6) at x in a sheet of the given width, or -1.
 func SheetColumnAt(width, x int) int {

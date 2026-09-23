@@ -3,6 +3,7 @@ package app
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
@@ -29,11 +30,15 @@ type FormRow struct {
 // Form is the "new task" editor: a name plus properties, some of them required.
 type Form struct {
 	Title string
-	Name  string
-	Rows  func() []FormRow
+	Name  string // the text in the input on top
+	// Hint and ListHint override the key hints on the input's and the list's border.
+	Hint, ListHint string
+	Rows           func() []FormRow
 	// Submit creates the task. When a required row is still empty it returns that row's
-	// index and false instead, so the UI can walk the user through it.
+	// index and false instead, so the UI can walk the user through it. Other problems set
+	// Error (shown in the form) and return -1, false.
 	Submit func(name string) (missing int, ok bool)
+	Error  string
 }
 
 // draft holds the values chosen in the form until the task is created.
@@ -112,9 +117,15 @@ func (a *App) NewTask(subtask bool) {
 			if parent != nil {
 				title = "New subtask of " + parent.Label()
 			}
-			a.UI.Form(&Form{Title: title, Rows: func() []FormRow { return a.formRows(d) }, Submit: func(name string) (int, bool) {
+			f := &Form{Title: title, Rows: func() []FormRow { return a.formRows(d) }}
+			f.Submit = func(name string) (int, bool) {
+				if strings.TrimSpace(name) == "" {
+					f.Error = "Give the task a name first"
+					return -1, false
+				}
 				return a.submitDraft(d, name)
-			}})
+			}
+			a.UI.Form(f)
 		})
 	})
 }
@@ -153,6 +164,20 @@ func (a *App) formRows(d *draft) []FormRow {
 		rows = append(rows, FormRow{Label: f.Name, Value: value, Required: f.Required, Missing: missing,
 			Edit: func(done func()) {
 				a.askField(*f, func(e fieldEdit) {
+					if f.Type == "users" {
+						// A new task has nobody yet: send everyone chosen, not the change
+						// relative to an earlier pick in this form.
+						var users []clickup.User
+						_ = json.Unmarshal(e.local, &users)
+						ids := make([]int64, len(users))
+						for i, u := range users {
+							ids[i] = u.ID
+						}
+						e.remote = map[string][]int64{"add": ids, "rem": {}}
+						if len(ids) == 0 {
+							e.local, e.remote = nil, nil
+						}
+					}
 					f.Value = e.local
 					if e.local == nil && e.remote == nil {
 						delete(d.edits, f.ID)
@@ -198,13 +223,8 @@ func (a *App) draftAssignees(d *draft, done func()) {
 }
 
 func (a *App) draftPriority(d *draft, done func()) {
-	items := make([]MenuItem, 0, len(priorities)+1)
-	for i, name := range priorities {
-		items = append(items, MenuItem{Key: rune('1' + i), Label: style.Fg(render.PriorityColors[name], style.Plain)("⚑ " + name), Value: i + 1})
-	}
-	items = append(items, MenuItem{Key: clearKey, Label: style.Dim("none"), Value: 0})
-	a.UI.Menu("Priority", items, max(d.priority-1, 0), func(item MenuItem) {
-		d.priority = item.Value.(int)
+	a.priorityMenu(d.priority, func(n int) {
+		d.priority = n
 		done()
 	})
 }
@@ -214,10 +234,8 @@ func (a *App) draftDue(d *draft, done func()) {
 	if d.due > 0 {
 		value = time.UnixMilli(d.due).Format(time.DateOnly)
 	}
-	a.UI.Prompt(Prompt{Title: "Due date", Value: value, Hint: dateHint}, func(answer string) {
+	a.UI.Prompt(Prompt{Title: "Due date", Value: value, Hint: dateHint, Check: a.checkDate}, func(answer string) {
 		switch day, kind := parse.Due(answer, a.Now()); kind {
-		case parse.DueInvalid:
-			a.UI.Notify(Error, "Can't parse date: "+answer)
 		case parse.DueClear:
 			d.due = 0
 			done()
@@ -231,10 +249,6 @@ func (a *App) draftDue(d *draft, done func()) {
 // submitDraft creates the task optimistically, or reports the first missing required row.
 func (a *App) submitDraft(d *draft, name string) (int, bool) {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		a.UI.Notify(Error, "Give the task a name first")
-		return -1, false
-	}
 	for i, row := range a.formRows(d) {
 		if row.Missing {
 			return i, false
@@ -321,10 +335,18 @@ func (a *App) submitDraft(d *draft, name string) (int, bool) {
 			if len(created.CustomFields) == 0 {
 				created.CustomFields = fields
 			}
-			if a.View == view && i >= 0 {
+			switch {
+			case a.View != view:
+			case i >= 0:
 				a.Tasks[i] = &created
+			case a.find(created.ID) == nil: // a reload dropped the placeholder meanwhile
+				a.Tasks = append(a.Tasks, &created)
+			}
+			if a.View == view {
 				a.persistView()
-				a.focusTask(&created)
+				if t := a.find(created.ID); t != nil {
+					a.focusTask(t)
+				}
 			}
 			a.UI.Notify(Info, "Created "+created.Label())
 		})

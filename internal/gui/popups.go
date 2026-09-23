@@ -38,7 +38,8 @@ type popup struct {
 	typing    bool // multi: the filter input has focus
 	prompt    app.Prompt
 	message   string
-	filled    bool // the input view was prefilled
+	filled    bool   // the input view was prefilled
+	err       string // shown in red on the input's border until the next keystroke
 
 	form       *app.Form
 	inList     bool // form: focus is on the properties, not the name
@@ -52,11 +53,26 @@ type popup struct {
 	onConfirm func()
 }
 
+// open shows p. A popup that arrives while another is open (e.g. the create form, once its
+// statuses have loaded, while you're in a menu) waits its turn instead of replacing it.
 func (gui *Gui) open(p *popup) {
 	if p.options != nil {
 		p.refilter("")
 	}
+	if gui.popup != nil || (gui.returnTo != nil && !gui.editingRow && p != gui.returnTo) {
+		gui.queued = append(gui.queued, p)
+		return
+	}
 	gui.popup = p
+}
+
+// openQueued shows the next waiting popup once nothing else is open.
+func (gui *Gui) openQueued() {
+	if gui.popup == nil && gui.returnTo == nil && len(gui.queued) > 0 {
+		p := gui.queued[0]
+		gui.queued = gui.queued[1:]
+		gui.open(p)
+	}
 }
 
 // close removes the popup views; callers run the popup's callback afterwards.
@@ -91,27 +107,44 @@ func (p *popup) count() int {
 	return len(p.visible)
 }
 
-// popupMove moves the selection; in a form, the first move from the name enters the list.
+// popupMove moves the selection. A form is one column without wrapping: the name on top,
+// then the properties, so ↓ goes from the name into them and ↑ on the first goes back.
 func (gui *Gui) popupMove(delta int) {
 	p := gui.popup
-	if p.kind == popupForm && !p.inList {
-		p.form.Name = gui.inputText()
-		p.inList = true
+	if p.kind != popupForm {
+		p.move(delta)
 		return
 	}
-	p.move(delta)
+	p.err = ""
+	switch {
+	case !p.inList && delta > 0 && p.count() > 0:
+		p.inList, p.sel = true, 0
+	case p.inList && p.sel+delta < 0:
+		p.inList = false
+	case p.inList:
+		p.sel = min(p.sel+delta, p.count()-1)
+	}
 }
 
-// popupTab switches between a form's name and its properties; elsewhere it moves down.
+// popupTab switches between a form's name and its properties, completes a prompt that can
+// (e.g. an @mention) and elsewhere moves down.
 func (gui *Gui) popupTab() {
 	p := gui.popup
+	if p.kind == popupPrompt {
+		if v, err := gui.g.View(viewPopupInput); err == nil && p.prompt.Complete != nil {
+			if text := v.TextArea.GetContent(); p.prompt.Complete(text) != text {
+				v.TextArea.Clear()
+				v.TextArea.TypeString(p.prompt.Complete(text))
+				v.RenderTextArea()
+			}
+		}
+		return
+	}
 	if p.kind != popupForm {
 		p.move(1)
 		return
 	}
-	if !p.inList {
-		p.form.Name = gui.inputText()
-	}
+	p.err = ""
 	p.inList = !p.inList
 }
 
@@ -169,11 +202,10 @@ func formLines(f *app.Form) []string {
 }
 
 // formSubmit creates the task, or walks the user through the first empty required field.
+// The form's name is kept up to date as you type (editPopupInput), so it's read from there:
+// the input view may be gone, e.g. right after a property editor closed.
 func (gui *Gui) formSubmit() error {
 	p := gui.popup
-	if !p.inList {
-		p.form.Name = gui.inputText()
-	}
 	missing, ok := p.form.Submit(p.form.Name)
 	switch {
 	case ok:
@@ -182,6 +214,9 @@ func (gui *Gui) formSubmit() error {
 	case missing >= 0:
 		p.autoSubmit = true
 		gui.formEdit(missing)
+	default:
+		p.err, p.form.Error = p.form.Error, ""
+		p.autoSubmit = false
 	}
 	return nil
 }
@@ -189,17 +224,16 @@ func (gui *Gui) formSubmit() error {
 // formEdit swaps the form for the editor of row i; resumeForm brings the form back.
 func (gui *Gui) formEdit(i int) {
 	p := gui.popup
-	if !p.inList {
-		p.form.Name = gui.inputText()
-	}
 	rows := p.form.Rows()
 	if i < 0 || i >= len(rows) {
 		return
 	}
-	p.sel, p.editDone = i, false
+	p.sel, p.editDone, p.err = i, false, ""
 	gui.close()
 	gui.returnTo = p
+	gui.editingRow = true // the row's editor may open now; other popups wait
 	rows[i].Edit(func() { p.editDone = true })
+	gui.editingRow = false
 	gui.resumeForm()
 }
 
@@ -211,7 +245,6 @@ func (gui *Gui) resumeForm() {
 	}
 	gui.returnTo = nil
 	p.filled = false
-	p.prompt.Value = p.form.Name
 	gui.open(p)
 	if p.editDone && p.autoSubmit {
 		_ = gui.formSubmit() // continue with the next required field, or create
@@ -228,17 +261,25 @@ func (gui *Gui) layoutPopup(maxX, maxY int) error {
 		return nil
 	}
 	lines := gui.popupLines(p)
-	// Title and key hints share the top border, so leave room for both.
-	contentW := style.Width(p.title) + style.Width(popupHint(p)) + 6
+	hasInput := p.kind == popupPicker || p.kind == popupPrompt || p.kind == popupForm || (p.kind == popupMulti && p.typing)
+	hasList := p.kind != popupPrompt
+	// The title and the key hints share a border (the input's, or the list's when there's
+	// no input), so leave room for both.
+	hint := listHint(p)
+	if hasInput {
+		hint = popupHint(p)
+	}
+	contentW := style.Width(p.title) + style.Width(hint) + 6
 	for _, l := range lines {
 		contentW = max(contentW, style.Width(l))
 	}
-	w := min(maxX-4, max(56, contentW+4))
+	w := max(min(maxX-4, max(56, contentW+4)), 10)
 	x0 := (maxX - w) / 2
+	if p.kind == popupConfirm || p.kind == popupInfo {
+		lines = wrapText(p.message, w-2) // size the popup for the wrapped text
+	}
 	listH := min(max(len(lines), 1), maxY-8)
 
-	hasInput := p.kind == popupPicker || p.kind == popupPrompt || p.kind == popupForm || (p.kind == popupMulti && p.typing)
-	hasList := p.kind != popupPrompt
 	height := 0
 	if hasInput {
 		height += 3
@@ -256,10 +297,17 @@ func (gui *Gui) layoutPopup(maxX, maxY int) error {
 		}
 		in.Title = p.title
 		in.Subtitle = popupHint(p)
+		if p.err != "" {
+			in.Subtitle = style.Red(p.err)
+		}
 		if !p.filled {
 			p.filled = true
+			text := cmp.Or(p.prompt.Value, p.query)
+			if p.form != nil {
+				text = p.form.Name
+			}
 			in.TextArea.Clear()
-			in.TextArea.TypeString(cmp.Or(p.prompt.Value, p.query))
+			in.TextArea.TypeString(text)
 			in.RenderTextArea()
 		}
 		gui.g.Cursor = !p.inList
@@ -281,14 +329,7 @@ func (gui *Gui) layoutPopup(maxX, maxY int) error {
 		if !hasInput {
 			v.Title = p.title
 		}
-		v.Subtitle = map[popupKind]string{
-			popupMenu:    "enter: select · esc: cancel",
-			popupPicker:  "↑↓: move · enter: select · esc: cancel",
-			popupMulti:   "space: toggle · /: filter · enter: done · esc: cancel",
-			popupConfirm: "enter: confirm · esc: cancel",
-			popupInfo:    "enter/esc: close",
-			popupForm:    "enter: edit · tab: name · ctrl+s: create",
-		}[p.kind]
+		v.Subtitle = listHint(p)
 		v.Highlight = p.kind != popupConfirm && p.kind != popupInfo && (p.kind != popupForm || p.inList)
 		if v.Highlight && p.sel < len(lines) {
 			lines[p.sel] = style.Strip(lines[p.sel]) // plain text reads best on the selection bar
@@ -307,19 +348,62 @@ func (gui *Gui) layoutPopup(maxX, maxY int) error {
 	if !hasInput && p.kind == popupMulti {
 		_ = gui.g.DeleteView(viewPopupInput)
 	}
-	if cur := gui.g.CurrentView(); cur == nil || cur.Name() != current {
-		_, err := gui.g.SetCurrentView(current)
-		return err
+	return gui.setCurrent(current)
+}
+
+// setCurrent focuses the named view. It compares views, not names: a popup that opens
+// another (a picker, then a prompt) deletes and recreates "popupInput", and gocui keeps
+// pointing at the deleted one, which would swallow the typing.
+func (gui *Gui) setCurrent(name string) error {
+	if v, err := gui.g.View(name); err == nil && gui.g.CurrentView() == v {
+		return nil
 	}
-	return nil
+	_, err := gui.g.SetCurrentView(name)
+	return err
+}
+
+// listHint is the key hint on the list's border.
+func listHint(p *popup) string {
+	if p.kind == popupForm && p.form.ListHint != "" {
+		return p.form.ListHint
+	}
+	return map[popupKind]string{
+		popupMenu:    "enter: select · esc: cancel",
+		popupPicker:  "↑↓: move · enter: select · esc: cancel",
+		popupMulti:   "space: toggle · /: filter · enter: done · esc: cancel",
+		popupConfirm: "enter: confirm · esc: cancel",
+		popupInfo:    "enter/esc: close",
+		popupForm:    "enter: edit · ↑: name · ctrl+s: create",
+	}[p.kind]
 }
 
 // popupHint is the key hint on the input's border (prompts show their own hint there).
 func popupHint(p *popup) string {
 	if p.kind == popupForm {
-		return "enter: create · tab: fields · esc: cancel"
+		return cmp.Or(p.form.Hint, "enter: create · ↓: fields · esc: cancel")
 	}
-	return p.prompt.Hint
+	return cmp.Or(p.prompt.Hint, p.prompt.Placeholder)
+}
+
+// wrapText word-wraps text to width display columns.
+func wrapText(text string, width int) []string {
+	var out []string
+	for _, para := range strings.Split(text, "\n") {
+		line := ""
+		for _, word := range strings.Fields(para) {
+			switch {
+			case line == "":
+				line = word
+			case style.Width(line)+1+style.Width(word) <= width:
+				line += " " + word
+			default:
+				out = append(out, line)
+				line = word
+			}
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func (gui *Gui) popupLines(p *popup) []string {
@@ -366,8 +450,12 @@ func (gui *Gui) popupLines(p *popup) []string {
 
 // --- interaction -------------------------------------------------------------------------------
 
-func (gui *Gui) popupConfirm() error {
-	defer gui.resumeForm()
+func (gui *Gui) popupConfirm() (err error) {
+	defer func() {
+		gui.resumeForm()
+		// An action run from the keybindings menu may want to quit.
+		err, gui.menuErr = cmp.Or(err, gui.menuErr), nil
+	}()
 	p := gui.popup
 	switch p.kind {
 	case popupForm:
@@ -395,6 +483,12 @@ func (gui *Gui) popupConfirm() error {
 		p.onMulti(p.chosen)
 	case popupPrompt:
 		text := strings.TrimSpace(gui.inputText())
+		if check := p.prompt.Check; check != nil && (text != "" || p.prompt.AllowEmpty) {
+			if err := check(text); err != nil {
+				p.err = err.Error() // stay open: fix the answer instead of retyping it
+				return nil
+			}
+		}
 		gui.close()
 		if text != "" || p.prompt.AllowEmpty {
 			p.onPrompt(text)
@@ -432,9 +526,9 @@ func (gui *Gui) popupRune(r rune) error {
 	p := gui.popup
 	switch {
 	case r == 'j':
-		p.move(1)
+		gui.popupMove(1)
 	case r == 'k':
-		p.move(-1)
+		gui.popupMove(-1)
 	case p.kind == popupMenu:
 		if i := slices.IndexFunc(p.items, func(it app.MenuItem) bool { return it.Key == r }); i >= 0 {
 			p.sel = i
@@ -468,8 +562,15 @@ func (gui *Gui) inputText() string {
 // editPopupInput types into a popup's input and refilters its list as you type.
 func (gui *Gui) editPopupInput(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) bool {
 	handled := gocui.SimpleEditor(v, key, ch, mod)
-	if p := gui.popup; p != nil && p.options != nil {
+	if p := gui.popup; p != nil && handled {
+		p.err = ""
+	}
+	switch p := gui.popup; {
+	case p == nil:
+	case p.options != nil:
 		p.refilter(v.TextArea.GetContent())
+	case p.form != nil:
+		p.form.Name = v.TextArea.GetContent() // rows may depend on it, e.g. a calculated end time
 	}
 	return handled
 }
