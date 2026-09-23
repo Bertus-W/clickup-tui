@@ -22,13 +22,29 @@ pull requests on Codeberg.
 
 ## Install
 
-**macOS and Linux:**
+**Installers:** download from the [latest release](https://github.com/Bertus-W/clickup-tui/releases/latest):
+
+| System | File | |
+|---|---|---|
+| macOS | `cu_<version>_macos.pkg` | Intel and Apple Silicon; installs `/usr/local/bin/cu` |
+| Windows | `cu_<version>_windows_amd64.msi` (or `_arm64`) | for your user only, no admin needed; puts `cu` on your PATH; uninstall from Settings → Apps |
+| Debian, Ubuntu | `clickup-tui_<version>_amd64.deb` (or `_arm64`) | `sudo apt install ./clickup-tui_*.deb` |
+| Fedora, RHEL | `clickup-tui-<version>-1.x86_64.rpm` (or `aarch64`) | `sudo dnf install ./clickup-tui-*.rpm` |
+| Alpine | `clickup-tui_<version>_x86_64.apk` | `sudo apk add --allow-untrusted ./clickup-tui_*.apk` |
+| Arch | `clickup-tui-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./clickup-tui-*.pkg.tar.zst` |
+
+The macOS package isn't signed with an Apple Developer ID, so the first time macOS refuses to open
+it: right-click it and choose **Open**, or allow it in System Settings → Privacy & Security. The
+Linux packages are called `clickup-tui` because Debian's `cu` is an unrelated serial-line tool;
+the command is still `cu`.
+
+**Install script, macOS and Linux:**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.sh | sh
 ```
 
-**Windows** (PowerShell):
+**Install script, Windows** (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/Bertus-W/clickup-tui/main/install.ps1 | iex
@@ -211,7 +227,10 @@ option in a popup to pick it.
 Tag a version on Codeberg and push the tag: `git tag v0.1.0 && git push origin v0.1.0`. The
 mirror carries it to GitHub, where a workflow builds `cu` for macOS, Linux and Windows (amd64
 and arm64) with [GoReleaser](https://goreleaser.com), publishes the release, and then installs it
-with both install scripts on each system to check them. `goreleaser release --snapshot --clean`
+with both install scripts on each system to check them. The installers workflow then builds the
+macOS `.pkg` and Windows `.msi`, installs each on a real machine (and uninstalls the `.msi`
+again), installs the `.deb`, `.rpm` and `.apk` on Ubuntu, Fedora and Alpine, and attaches the
+installers to the release. It can also be run by hand for an existing tag. `goreleaser release --snapshot --clean`
 builds the same archives locally, in `dist/`.
 
 ## Code
