@@ -23,7 +23,7 @@ previous="$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || true)"
 range="${previous:+$previous..}$tag"
 notes="$(git log --no-merges --pretty='- %s' "$range")
 
-**Install:** download an installer below (\`.pkg\` for macOS, \`_setup.exe\` for Windows, \`.deb\`/\`.rpm\`/\`.apk\`/Arch for Linux), or
+**Install:**
 - macOS, Linux: \`curl -fsSL https://codeberg.org/$repo/raw/branch/main/install.sh | sh\`
 - Windows: \`irm https://codeberg.org/$repo/raw/branch/main/install.ps1 | iex\`
 

@@ -22,41 +22,23 @@ pull requests on Codeberg.
 
 ## Install
 
-**Installers:** download from the [latest release](https://codeberg.org/b-wisman/clickup-tui/releases/latest):
-
-| System | File | |
-|---|---|---|
-| macOS | `cu_<version>_macos.pkg` | Intel and Apple Silicon; installs `/usr/local/bin/cu` |
-| Windows | `cu_<version>_windows_setup.exe` | x64 and ARM64; for your user only, no admin needed; puts `cu` on your PATH; uninstall from Settings → Apps |
-| Debian, Ubuntu | `clickup-tui_<version>_amd64.deb` (or `_arm64`) | `sudo apt install ./clickup-tui_*.deb` |
-| Fedora, RHEL | `clickup-tui-<version>-1.x86_64.rpm` (or `aarch64`) | `sudo dnf install ./clickup-tui-*.rpm` |
-| Alpine | `clickup-tui_<version>_x86_64.apk` | `sudo apk add --allow-untrusted ./clickup-tui_*.apk` |
-| Arch | `clickup-tui-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./clickup-tui-*.pkg.tar.zst` |
-
-The installers aren't signed (that takes a paid Apple Developer ID and a Windows code signing
-certificate). The first time, macOS refuses to open the `.pkg`: right-click it and choose
-**Open**, or allow it in System Settings → Privacy & Security. Windows may show "Windows protected
-your PC": choose **More info** → **Run anyway**. The Linux packages are called `clickup-tui` because Debian's `cu` is an unrelated serial-line tool;
-the command is still `cu`.
-
-**Install script, macOS and Linux:**
+**macOS and Linux:**
 
 ```sh
 curl -fsSL https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/install.sh | sh
 ```
 
-**Install script, Windows** (PowerShell):
+**Windows** (PowerShell):
 
 ```powershell
 irm https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/install.ps1 | iex
 ```
 
-Both install the latest release and check its checksum; `cu version` shows what you have.
-`install.sh` puts `cu` in `/usr/local/bin` when it can, else `~/.local/bin`
-(`CU_INSTALL_DIR` picks another place); `install.ps1` uses `%LocalAppData%\Programs\cu` and adds
-it to your PATH. `CU_VERSION=v0.1.0` installs a specific release. Or download an archive from the
-[releases](https://codeberg.org/b-wisman/clickup-tui/releases) yourself; every file is listed with
-its SHA-256 in `checksums.txt`.
+Both download the latest [release](https://codeberg.org/b-wisman/clickup-tui/releases) from
+Codeberg and check its checksum. `install.sh` puts `cu` in `/usr/local/bin` when it can, else
+`~/.local/bin` (`CU_INSTALL_DIR` picks another place); `install.ps1` uses
+`%LocalAppData%\Programs\cu` and adds it to your PATH. `CU_VERSION=v0.2.1` installs a specific
+release. You can also download an archive from the releases page yourself.
 
 **With Go** (1.26 or newer):
 
@@ -226,28 +208,15 @@ option in a popup to pick it.
 
 ## Releases
 
-Releases are made on Codeberg. Tag a version and push the tag:
+Tag a version on Codeberg and push the tag:
 
 ```sh
-git tag -a v0.2.0 -m "cu v0.2.0" && git push origin v0.2.0
+git tag -a v0.2.1 -m "cu v0.2.1" && git push origin v0.2.1
 ```
 
-Codeberg's CI (`.forgejo/workflows/release.yml`) runs the tests, builds everything with
-`packaging/release.sh` and publishes the Codeberg release. The script runs on Linux or macOS and
-needs Go, [nFPM](https://nfpm.goreleaser.com) and NSIS (`makensis`); `packaging/release.sh v0.0.0`
-builds a release into `dist/` locally. It makes:
-
-- `cu` for macOS, Linux and Windows on amd64 and arm64, as archives
-- the Linux packages, with nFPM (`packaging/linux`)
-- the macOS `.pkg`, with two small Go tools that stand in for Apple's `lipo` and `pkgbuild`
-  (`packaging/macos`), so it can be built on Linux
-- the Windows `setup.exe`, with NSIS (`packaging/windows`)
-- `checksums.txt` over all of them
-
-The GitHub mirror then copies the release (`.github/workflows/release.yml`): it waits for the
-Codeberg release, checks the checksums, publishes the same files and notes on GitHub, and installs
-the release with every installer on real macOS, Windows and Linux machines, which Codeberg's CI
-doesn't have. GitHub is optional: without it, the Codeberg release is complete.
+Codeberg's CI (`.forgejo/workflows/release.yml`) runs the tests, builds the archives with
+`packaging/release.sh` and publishes them as the Codeberg release (`packaging/publish-codeberg.sh`).
+`packaging/release.sh v0.0.0` builds the same archives locally, into `dist/`.
 
 ## Code
 

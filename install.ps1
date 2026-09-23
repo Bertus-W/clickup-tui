@@ -2,9 +2,6 @@
 #
 #   irm https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/install.ps1 | iex
 #
-# (The installer, cu_<version>_windows_setup.exe on the releases page, does the same with a
-# wizard, and adds an uninstaller.)
-#
 # $env:CU_VERSION = "v0.1.0" picks a release. cu goes to %LocalAppData%\Programs\cu, which is
 # added to your user PATH. The download is checked against the release's checksums.
 $ErrorActionPreference = "Stop"
