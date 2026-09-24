@@ -439,9 +439,7 @@ func (a *App) setTasks(tasks []*clickup.Task) {
 	a.Tasks = tasks
 	if a.Detail != nil && !slices.Contains(a.Pinned, a.Detail) { // a pinned task stays shown as is
 		if fresh := a.find(a.Detail.ID); fresh != nil && fresh != a.Detail {
-			if fresh.Subtasks == nil {
-				fresh.Subtasks = a.Detail.Subtasks
-			}
+			keepDetails(fresh, a.Detail)
 			a.Detail = fresh
 		}
 	}
@@ -592,7 +590,7 @@ func (a *App) LoadDetail(t *clickup.Task) {
 			}
 			changed := full.DateUpdated != target.DateUpdated
 			if a.touch[id] == touched { // an edit since the fetch started is newer than this data
-				*target = full
+				replace(target, full)
 				a.propagate(target)
 			} else {
 				changed = false

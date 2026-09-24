@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -300,8 +301,12 @@ func taskQuery(includeClosed bool) url.Values {
 }
 
 // ListTasks iterates over the pages of tasks in a list (including subtasks).
+// ListTasks pages through a list's tasks, including tasks from other lists that were added
+// to it (ClickUp's "tasks in multiple lists"), which the API leaves out unless asked.
 func (c *Client) ListTasks(ctx context.Context, listID string, includeClosed bool) iter.Seq2[[]Task, error] {
-	return c.pages(ctx, "/list/"+listID+"/task", taskQuery(includeClosed))
+	q := taskQuery(includeClosed)
+	q.Set("include_timl", "true")
+	return c.pages(ctx, "/list/"+listID+"/task", q)
 }
 
 // AssignedTasks iterates over the pages of tasks assigned to a user across the workspace.
@@ -340,7 +345,20 @@ func (c *Client) Comments(ctx context.Context, taskID string) ([]Comment, error)
 		oldest := out.Comments[len(out.Comments)-1]
 		q = url.Values{"start": {string(oldest.Date)}, "start_id": {string(oldest.ID)}}
 	}
-	return nonNil(all), nil
+	// Replies in a thread don't come with the task's comments: only their count does.
+	var wg sync.WaitGroup
+	errs := make([]error, len(all))
+	for i := range all {
+		if all[i].ReplyCount.Int() > 0 {
+			wg.Go(func() {
+				var out struct{ Comments []Comment }
+				errs[i] = c.do(ctx, http.MethodGet, "/comment/"+string(all[i].ID)+"/reply", nil, nil, &out)
+				all[i].Replies = out.Comments
+			})
+		}
+	}
+	wg.Wait()
+	return nonNil(all), errors.Join(errs...)
 }
 
 // CreateComment posts a comment. With mentions it's sent as rich parts, so ClickUp tags

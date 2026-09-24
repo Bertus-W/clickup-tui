@@ -2,6 +2,8 @@ package render
 
 import (
 	"cmp"
+	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -14,7 +16,8 @@ import (
 )
 
 // Detail renders the task panel: title, meta, custom fields, description, subtasks and comments.
-func Detail(t *clickup.Task, comments []clickup.Comment, now time.Time) string {
+// width is the panel's inner width: code blocks are boxes that span it.
+func Detail(t *clickup.Task, comments []clickup.Comment, now time.Time, width int) string {
 	var b strings.Builder
 	b.WriteString("\n" + style.Bold(t.Name) + "\n\n")
 
@@ -51,7 +54,7 @@ func Detail(t *clickup.Task, comments []clickup.Comment, now time.Time) string {
 	if len(t.CustomFields) > 0 {
 		b.WriteString(FieldsBlock(t) + "\n")
 	}
-	b.WriteString(Markdown(cmp.Or(strings.TrimSpace(t.Body()), "*No description*")))
+	b.WriteString(Markdown(cmp.Or(strings.TrimSpace(t.Body()), "*No description*"), width))
 
 	if len(t.Subtasks) > 0 {
 		b.WriteString("\n" + style.Bold("Subtasks") + "\n")
@@ -65,22 +68,49 @@ func Detail(t *clickup.Task, comments []clickup.Comment, now time.Time) string {
 		b.WriteString(style.Bold("Comments") + "\n" + style.Dim("loading…") + "\n")
 		return b.String()
 	}
-	b.WriteString(style.Bold("Comments ("+strconv.Itoa(len(comments))+")") + "\n")
-	sorted := slices.SortedStableFunc(slices.Values(comments), func(a, b clickup.Comment) int {
-		return cmp.Compare(a.Date.Int(), b.Date.Int())
-	})
-	for _, c := range sorted {
-		when := ""
-		if t, ok := Millis(c.Date); ok {
-			when = t.Format("2006-01-02 15:04")
+	count := len(comments)
+	for _, c := range comments {
+		count += len(c.Replies)
+	}
+	b.WriteString(style.Bold("Comments ("+strconv.Itoa(count)+")") + "\n")
+	for _, c := range byDate(comments) {
+		b.WriteString("\n" + commentBlock(c, "", width))
+		for _, r := range byDate(c.Replies) { // a thread's replies, indented under it
+			b.WriteString(commentBlock(r, "  ↳ ", width))
 		}
-		header := style.BoldCyan(cmp.Or(c.User.Username, "?")) + " " + style.Dim(when)
-		if c.Pending {
-			header += " " + style.Yellow("sending…")
-		}
-		b.WriteString("\n" + header + "\n" + Markdown(strings.TrimSpace(c.Text())))
 	}
 	return b.String()
+}
+
+func byDate(comments []clickup.Comment) []clickup.Comment {
+	return slices.SortedStableFunc(slices.Values(comments), func(a, b clickup.Comment) int {
+		return cmp.Compare(a.Date.Int(), b.Date.Int())
+	})
+}
+
+// commentBlock is a comment's header and text; replies get a marker and their text indented.
+func commentBlock(c clickup.Comment, marker string, width int) string {
+	when := ""
+	if t, ok := Millis(c.Date); ok {
+		when = t.Format("2006-01-02 15:04")
+	}
+	header := style.Dim(marker) + style.BoldCyan(cmp.Or(c.User.Username, "?")) + " " + style.Dim(when)
+	if c.Pending {
+		header += " " + style.Yellow("sending…")
+	}
+	indent := strings.Repeat(" ", style.Width(marker))
+	text := Markdown(strings.TrimSpace(c.Text()), width-len(indent))
+	if c.Formatted() { // written in ClickUp's editor: its formatting says more than markdown
+		text = Rich(c.Parts, width-len(indent))
+	}
+	if marker != "" {
+		var lines []string
+		for line := range strings.Lines(text) {
+			lines = append(lines, indent+line)
+		}
+		text = strings.Join(lines, "")
+	}
+	return header + "\n" + text
 }
 
 var (
@@ -90,32 +120,42 @@ var (
 	numbered  = regexp.MustCompile(`^(\s*)(\d+)[.)]\s+(.*)$`)
 	quote     = regexp.MustCompile(`^\s*>\s?(.*)$`)
 	rule      = regexp.MustCompile(`^\s*([-*_])(\s*[-*_]){2,}\s*$`)
-	inlineTok = regexp.MustCompile("`([^`]+)`" + // 1: code
-		`|\[([^\]]+)\]\(([^)\s]+)\)` + // 2, 3: [text](url)
-		`|(https?://[^\s)>\]]+)` + // 4: a bare URL
-		`|\*\*([^*]+)\*\*` + // 5: bold
-		`|~~([^~]+)~~` + // 6: strikethrough
-		`|(^|[\s(])[*_]([^*_\s][^*_]*?)[*_]($|[\s).,!?:;])` + // 7, 8, 9: italic with what surrounds it
-		`|(^|\s)(@\w[\w.-]*)`) // 10, 11: a mention
+	inlineTok = regexp.MustCompile("`(?P<code>[^`]+)`" +
+		`|!\[(?P<alt>[^\]]*)\]\((?P<img>[^)\s]+)\)` + // an image, often without a name
+		`|\[(?P<text>[^\]]*)\]\((?P<href>[^)\s]+)\)` +
+		`|(?P<url>https?://[^\s)>\]]+)` +
+		`|\*\*(?P<bold>[^*]+)\*\*` +
+		`|~~(?P<strike>[^~]+)~~` +
+		`|(?P<pre>^|[\s(])[*_](?P<em>[^*_\s][^*_]*?)[*_](?P<post>$|[\s).,!?:;])` + // italic, and what surrounds it
+		`|(?P<space>^|\s)(?P<mention>@\w[\w.-]*)`)
 )
 
 // Markdown renders the markdown people write in ClickUp for the terminal: headings, bold,
 // italic, strikethrough, code, links, bullets, numbered lists, checklists, quotes, rules,
-// fenced code blocks and @mentions. Anything else is shown as written.
-func Markdown(md string) string {
+// fenced code blocks and @mentions. Anything else is shown as written. Code blocks are grey
+// boxes width columns wide.
+func Markdown(md string, width int) string {
 	var b strings.Builder
-	inFence := false
+	var code []string // the lines of the code block being read
+	lang, inFence := "", false
 	for line := range strings.Lines(md) {
 		line = strings.TrimRight(line, "\r\n")
 		switch {
 		case strings.HasPrefix(strings.TrimSpace(line), "```"):
+			if inFence {
+				b.WriteString(codeBox(lang, code, width))
+				code = nil
+			}
 			inFence = !inFence
-			continue
+			lang = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "```"))
 		case inFence:
-			b.WriteString(style.Dim("  │ ") + style.Yellow(line) + "\n")
-			continue
+			code = append(code, line)
+		default:
+			b.WriteString(block(line) + "\n")
 		}
-		b.WriteString(block(line) + "\n")
+	}
+	if inFence { // an unclosed block runs to the end
+		b.WriteString(codeBox(lang, code, width))
 	}
 	return b.String()
 }
@@ -146,27 +186,44 @@ func block(line string) string {
 	return inline(line)
 }
 
-// inline styles the spans of one line. Styles don't nest, so each span gets one style.
+// inline styles the spans of one line. Styles don't nest, so each span gets one style. Links
+// and images become clickable labels (style.Link) instead of showing their URL.
 func inline(line string) string {
 	return inlineTok.ReplaceAllStringFunc(line, func(tok string) string {
 		m := inlineTok.FindStringSubmatch(tok)
+		g := func(name string) string { return m[inlineTok.SubexpIndex(name)] }
 		switch {
-		case m[1] != "":
-			return style.Yellow(m[1])
-		case m[2] != "":
-			return style.Cyan(m[2]) + style.Dim(" ("+m[3]+")")
-		case m[4] != "":
-			url := strings.TrimRight(m[4], ".,;:!?") // "see https://x.test/a, then …"
-			return style.Cyan(url) + m[4][len(url):]
-		case m[5] != "":
-			return style.Bold(m[5])
-		case m[6] != "":
-			return style.Strike(m[6])
-		case m[8] != "":
-			return m[7] + style.Italic(m[8]) + m[9]
-		case m[11] != "":
-			return m[10] + style.BoldCyan(m[11])
+		case g("code") != "":
+			return style.Code(" " + g("code") + " ")
+		case g("img") != "":
+			return style.Link(g("img"), style.LinkText("[image: "+cmp.Or(g("alt"), linkName(g("img")))+"]"))
+		case g("href") != "":
+			return style.Link(g("href"), style.LinkText(cmp.Or(g("text"), linkName(g("href")))))
+		case g("url") != "":
+			u := strings.TrimRight(g("url"), ".,;:!?") // "see https://x.test/a, then …"
+			return style.Link(u, style.LinkText(u)) + g("url")[len(u):]
+		case g("bold") != "":
+			return style.Bold(g("bold"))
+		case g("strike") != "":
+			return style.Strike(g("strike"))
+		case g("em") != "":
+			return g("pre") + style.Italic(g("em")) + g("post")
+		case g("mention") != "":
+			return g("space") + style.BoldCyan(g("mention"))
 		}
 		return tok
 	})
+}
+
+// linkName names a link that has no text: the file it points at (ClickUp's attachment URLs
+// end in the file name, e.g. image.png), else its host.
+func linkName(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if name, err := url.PathUnescape(path.Base(u.Path)); err == nil && name != "." && name != "/" {
+		return name
+	}
+	return cmp.Or(u.Host, raw)
 }

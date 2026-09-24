@@ -86,6 +86,10 @@ func Demo() *Server {
 				t.Status = st
 			}
 		}
+		if i == 1 { // a code block, and a pasted image the way ClickUp writes it: no name, just the URL
+			t.MarkdownDescription += "\n\n```go\nif seen[event.ID] {\n\treturn nil // already charged\n}\n```\n\n" +
+				"![](https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/docs/screenshot.png)"
+		}
 		if d.Priority > 0 {
 			name := []string{"", "urgent", "high", "normal", "low"}[d.Priority]
 			t.Priority = &clickup.Priority{ID: clickup.FlexString(strconv.Itoa(d.Priority)), Priority: name}

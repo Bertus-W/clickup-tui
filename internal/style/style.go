@@ -39,7 +39,10 @@ var (
 	BoldCyan       = sgr("1;36")
 	Reverse        = sgr("7")
 	Italic         = sgr("3")
-	Strike         = sgr("2;9")
+	LinkText       = sgr("4;36") // underlined cyan: something to click
+	// Inline code: soft red on grey, like ClickUp. Code blocks are highlighted (render/code.go).
+	Code   = sgr("38;2;235;120;120;48;2;52;55;61")
+	Strike = sgr("2;9")
 )
 
 var hexPattern = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
@@ -74,6 +77,31 @@ func Fg(color string, fallback Style) Style {
 	return sgr(fmt.Sprintf("38;2;%d;%d;%d", r, g, b))
 }
 
+var rgbPattern = regexp.MustCompile(`^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)`)
+
+// Color is the SGR code for a colour ClickUp's editor writes: #rgb, #rrggbb or rgb(r, g, b),
+// as a foreground or (bg) background colour.
+func Color(value string, bg bool) (code string, ok bool) {
+	var r, g, b int64
+	if hex, ok := Hex(value); ok {
+		r, g, b = rgb(hex)
+	} else if m := rgbPattern.FindStringSubmatch(value); m != nil {
+		r, _ = strconv.ParseInt(m[1], 10, 0)
+		g, _ = strconv.ParseInt(m[2], 10, 0)
+		b, _ = strconv.ParseInt(m[3], 10, 0)
+	} else {
+		return "", false
+	}
+	layer := 38
+	if bg {
+		layer = 48
+	}
+	return fmt.Sprintf("%d;2;%d;%d;%d", layer, r, g, b), true
+}
+
+// Codes combines SGR codes (e.g. "1" bold and a Color) into one style.
+func Codes(codes ...string) Style { return sgr(strings.Join(codes, ";")) }
+
 // Contrast picks black or white text for a background colour.
 func Contrast(hex string) string {
 	r, g, b := rgb(hex)
@@ -97,7 +125,20 @@ func Chip(label, color string) string {
 	return sgr(fmt.Sprintf("%s;48;2;%d;%d;%d", fg, r, g, b))(" " + label + " ")
 }
 
-var ansi = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+// ansi matches colour codes and OSC 8 hyperlinks (see Link).
+var ansi = regexp.MustCompile(`\x1b\[[0-9;]*m|\x1b\]8;[^\x1b\x07]*(?:\x1b\\|\x07)`)
+
+// Link makes text a hyperlink to url (OSC 8): gocui reports clicks on it, and terminals that
+// support it open it on cmd/ctrl-click.
+func Link(url, text string) string {
+	url = strings.Map(func(r rune) rune { // no control characters inside the escape code
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, url)
+	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
 
 // Strip removes escape codes.
 func Strip(s string) string { return ansi.ReplaceAllString(s, "") }

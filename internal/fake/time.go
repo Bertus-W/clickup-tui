@@ -91,7 +91,7 @@ func (s *Server) timeRoutes(handle func(string, func(http.ResponseWriter, *http.
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		s.stop()
-		now := time.Now()
+		now := s.Now()
 		e := s.Entry(body.TID, now, 0, "")
 		e.Duration = clickup.FlexString(strconv.FormatInt(-now.UnixMilli(), 10))
 		e.End = ""
@@ -112,7 +112,7 @@ func (s *Server) stop() clickup.TimeEntry {
 		return clickup.TimeEntry{}
 	}
 	e := *s.Running
-	d := max(time.Since(e.StartTime()), time.Minute)
+	d := max(s.Now().Sub(e.StartTime()), time.Minute)
 	e.Duration = clickup.FlexString(strconv.FormatInt(d.Milliseconds(), 10))
 	e.End = clickup.FlexString(strconv.FormatInt(e.StartTime().Add(d).UnixMilli(), 10))
 	s.Entries = append(s.Entries, e)

@@ -95,8 +95,9 @@ type Gui struct {
 	toastUntil time.Time
 	spin       int
 
-	// editor opens text in $EDITOR; tests replace it.
-	editor func(initial string) (string, bool, error)
+	// editor opens text in $EDITOR, browser opens a URL; tests replace them.
+	editor  func(initial string) (string, bool, error)
+	browser func(url string) error
 }
 
 type Options struct {
@@ -117,7 +118,7 @@ func New(opts Options) (*Gui, error) {
 		return nil, err
 	}
 	gui := &Gui{g: g, panel: viewTasks, lastList: viewTasks, showLog: true, expanded: map[string]bool{}}
-	gui.editor = gui.runEditor
+	gui.editor, gui.browser = gui.runEditor, openURL
 	gui.async = opts.Async
 	if gui.async == nil {
 		gui.async = newAsync(g)
@@ -136,6 +137,7 @@ func New(opts Options) (*Gui, error) {
 	if err := gui.registerMouse(); err != nil {
 		return nil, err
 	}
+	g.SetOpenHyperlinkFunc(gui.openLink)
 	return gui, nil
 }
 
@@ -562,7 +564,8 @@ func (gui *Gui) renderDetail() {
 		v.SetOrigin(0, 0)
 	}
 	v.Subtitle = t.Label()
-	write(v, strings.Split(render.Detail(t, gui.App.Comments, gui.App.Now()), "\n"))
+	width, _ := v.InnerSize()
+	write(v, strings.Split(render.Detail(t, gui.App.Comments, gui.App.Now(), width), "\n"))
 	if gui.detailToEnd {
 		gui.detailToEnd = false
 		v.SetOriginY(max(v.ViewLinesHeight()-v.InnerHeight(), 0))
@@ -687,7 +690,21 @@ func (gui *Gui) Notify(level app.Level, msg string) {
 func (gui *Gui) Refresh() {} // gocui redraws after every event and UI update
 
 func (gui *Gui) Clipboard(text string) error { return copyToClipboard(text) }
-func (gui *Gui) OpenURL(url string) error    { return openURL(url) }
+func (gui *Gui) OpenURL(url string) error    { return gui.browser(url) }
+
+// openLink opens a link or image clicked in the task panel (markdown links are hyperlinks,
+// see style.Link) in the browser.
+func (gui *Gui) openLink(link, view string) error {
+	if gui.popup != nil || view != viewDetail {
+		return nil // clicks behind a popup don't count
+	}
+	if err := gui.browser(link); err != nil {
+		gui.Notify(app.Error, "Opening "+link+": "+err.Error())
+		return nil
+	}
+	gui.Notify(app.Info, "Opened in your browser: "+link)
+	return nil
+}
 
 func (gui *Gui) Edit(title, initial string, onDone func(string)) {
 	text, ok, err := gui.editor(initial)

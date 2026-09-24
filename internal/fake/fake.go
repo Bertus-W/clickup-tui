@@ -36,12 +36,14 @@ type Server struct {
 	order       []string
 	Tasks       map[string]*clickup.Task
 	Comments    map[string][]clickup.Comment
-	Fields      []clickup.CustomField // field definitions on the list
+	Replies     map[string][]clickup.Comment // per comment id: its thread
+	Fields      []clickup.CustomField        // field definitions on the list
 	Requests    []string
 	FailUpdates bool
 	FailField   string              // task updates that set this field fail
 	Entries     []clickup.TimeEntry // time tracking
 	Running     *clickup.TimeEntry
+	Now         func() time.Time      // the server's clock for timers; tests pin it with the app's
 	Mentions    []clickup.CommentPart // the mentions of every comment posted
 	nextEntry   int
 
@@ -50,7 +52,8 @@ type Server struct {
 
 // New starts a server with the given tasks.
 func New(tasks ...clickup.Task) *Server {
-	s := &Server{Tasks: map[string]*clickup.Task{}, Comments: map[string][]clickup.Comment{}}
+	s := &Server{Tasks: map[string]*clickup.Task{}, Comments: map[string][]clickup.Comment{},
+		Replies: map[string][]clickup.Comment{}, Now: time.Now}
 	for _, t := range tasks {
 		s.add(t)
 	}
@@ -169,7 +172,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 		return clickup.List{ID: clickup.FlexString(r.PathValue("list")), Name: "Backlog", Statuses: Statuses}
 	})
 	handle("GET "+p+"/list/{list}/task", func(_ http.ResponseWriter, r *http.Request) any {
-		inList := func(t *clickup.Task) bool { return string(t.List.ID) == r.PathValue("list") }
+		list, timl := r.PathValue("list"), r.URL.Query().Get("include_timl") == "true"
+		inList := func(t *clickup.Task) bool { // like ClickUp: tasks added from other lists only with include_timl
+			return string(t.List.ID) == list ||
+				timl && slices.ContainsFunc(t.Locations, func(l clickup.Ref) bool { return string(l.ID) == list })
+		}
 		return map[string]any{"tasks": s.visible(r, inList), "last_page": true}
 	})
 	handle("PUT /api/v3/workspaces/{team}/tasks/{id}/home_list/{list}", func(_ http.ResponseWriter, r *http.Request) any {
@@ -227,6 +234,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 			return apiErr{404, "Task not found"}
 		}
 		out := *t
+		// Like the real API: a task fetched on its own reports another orderindex than the
+		// list does. Here it's the list's order reversed, so a leak into the list shows.
+		out.OrderIndex = -out.OrderIndex
 		out.Subtasks = []clickup.Task{}
 		for _, id := range s.order {
 			if string(s.Tasks[id].Parent) == t.ID {
@@ -261,11 +271,17 @@ func (s *Server) routes(mux *http.ServeMux) {
 		return out
 	})
 	handle("GET "+p+"/task/{id}/comment", func(_ http.ResponseWriter, r *http.Request) any {
-		comments := s.Comments[r.PathValue("id")]
-		if comments == nil {
-			comments = []clickup.Comment{}
+		comments := []clickup.Comment{}
+		for _, c := range s.Comments[r.PathValue("id")] {
+			// Like the real API: a thread's replies aren't included, only how many there are.
+			c.ReplyCount = clickup.FlexString(strconv.Itoa(len(s.Replies[string(c.ID)])))
+			c.Replies = nil
+			comments = append(comments, c)
 		}
 		return map[string]any{"comments": comments}
+	})
+	handle("GET "+p+"/comment/{id}/reply", func(_ http.ResponseWriter, r *http.Request) any {
+		return map[string]any{"comments": append([]clickup.Comment{}, s.Replies[r.PathValue("id")]...)}
 	})
 	handle("POST "+p+"/task/{id}/comment", func(_ http.ResponseWriter, r *http.Request) any {
 		var body struct {
@@ -373,7 +389,9 @@ func (s *Server) visible(r *http.Request, keep func(*clickup.Task) bool) []click
 	for _, id := range s.order {
 		t := s.Tasks[id]
 		if keep(t) && (closed || !t.Status.Closed()) {
-			out = append(out, *t)
+			row := *t
+			row.TimeSpent = "" // like the real API: lists leave out the tracked time
+			out = append(out, row)
 		}
 	}
 	return out

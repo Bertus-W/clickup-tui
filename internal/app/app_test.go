@@ -616,6 +616,7 @@ func timeHarness(t *testing.T) *harness {
 		srv.Entry("t3", at(22, 10, 0), 30*time.Minute, ""),
 		srv.Entry("t3", at(14, 10, 0), time.Hour, "last week"),
 	}
+	srv.Now = func() time.Time { return wednesday } // the same clock as the app, whatever today is
 	h := newHarness(t, srv, nil)
 	h.app.Now = func() time.Time { return wednesday }
 	return h.boot()
@@ -964,5 +965,87 @@ func TestCommentMentions(t *testing.T) {
 	}
 	if note := h.ui.notes[len(h.ui.notes)-1]; note != "Comment posted on DEV-1" {
 		t.Fatalf("note = %q", note)
+	}
+}
+
+// A task fetched on its own (the task panel, pinned refreshes) reports another orderindex than
+// its list. The list keeps its own order: rows don't jump when you select one.
+func TestSelectingDoesNotReorder(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	h.do(func(a *app.App) { a.OpenView(backlog) })
+	before := h.rows()
+	for i := range 5 {
+		h.do(func(a *app.App) { a.Select(i) })
+		if got := h.rows(); !slices.Equal(got, before) {
+			t.Fatalf("selecting row %d reordered the list: %v", i, got)
+		}
+	}
+	h.do((*app.App).TogglePin)
+	h.do((*app.App).RefreshPinned)
+	if got := h.rows(); !slices.Equal(got, before) {
+		t.Fatalf("refreshing pinned tasks reordered the list: %v", got)
+	}
+}
+
+// A task whose home is another list, added to this one too ("tasks in multiple lists"), shows
+// in this list.
+func TestTaskFromAnotherListShows(t *testing.T) {
+	srv := fake.Basic(3)
+	srv.Tasks["t3"].List = clickup.Ref{ID: "L2", Name: "Inbox"}
+	srv.Tasks["t3"].Locations = []clickup.Ref{{ID: fake.ListID, Name: "Backlog"}}
+	h := newHarness(t, srv, nil).boot()
+	h.do(func(a *app.App) { a.OpenView(backlog) })
+	if got := h.rows(); !slices.Contains(got, "Task number 3") {
+		t.Fatalf("Backlog rows = %v, want the task from Inbox too", got)
+	}
+	h.do(func(a *app.App) { a.OpenView(app.View{Kind: "list", ID: "L2", Name: "Inbox"}) })
+	if got := h.rows(); !slices.Equal(got, []string{"Task number 3"}) {
+		t.Fatalf("Inbox rows = %v", got)
+	}
+}
+
+// The tracked time comes only with a task fetched on its own; a list refresh or an edit made
+// through another copy must not wipe it from the task panel.
+func TestTrackedTimeSurvivesRefreshAndEdits(t *testing.T) {
+	srv := fake.Basic(5)
+	srv.Tasks["t1"].TimeSpent = "5400000" // 1:30
+	h := newHarness(t, srv, nil).boot()
+	h.do(func(a *app.App) { a.OpenView(backlog) })
+	h.do(func(a *app.App) { a.Select(0) })
+	tracked := func() string {
+		return strings.Join(strings.Fields(style.Strip(render.Detail(h.app.Detail, nil, time.Now(), 80))), " ")
+	}
+	if !strings.Contains(tracked(), "tracked 1:30") {
+		t.Fatalf("task panel: %s", tracked())
+	}
+	srv.Tasks["t2"].Name = "Changed elsewhere" // so the refresh brings new list data
+	h.do(func(a *app.App) { a.LoadTasks(true) })
+	if !strings.Contains(tracked(), "tracked 1:30") {
+		t.Fatalf("after a list refresh: %s", tracked())
+	}
+	h.do((*app.App).TogglePin)
+	h.do((*app.App).Rename, "Renamed") // edits the list copy, which updates the pinned one
+	if p := h.app.Pinned[0]; p.TimeSpent != "5400000" || p.Name != "Renamed" {
+		t.Fatalf("pinned copy: name %q, tracked %q", p.Name, p.TimeSpent)
+	}
+}
+
+// Replies in a comment thread come from their own endpoint; the task panel shows them under
+// their comment.
+func TestCommentThreadReplies(t *testing.T) {
+	srv := fake.Basic(5)
+	srv.Replies["c1"] = []clickup.Comment{
+		{ID: "r1", CommentText: "a reply in the thread", User: fake.Other, Date: "1700000100000"},
+	}
+	h := newHarness(t, srv, nil).boot()
+	c := h.app.Comments
+	if len(c) != 1 || len(c[0].Replies) != 1 || c[0].Replies[0].CommentText != "a reply in the thread" {
+		t.Fatalf("comments = %+v", c)
+	}
+	panel := style.Strip(render.Detail(h.app.Detail, h.app.Comments, time.Now(), 80))
+	for _, want := range []string{"Comments (2)", "first!", "↳ alice", "    a reply in the thread"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("task panel lacks %q:\n%s", want, panel)
+		}
 	}
 }

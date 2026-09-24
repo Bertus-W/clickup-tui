@@ -882,3 +882,20 @@ func TestTimesheetAddRowByID(t *testing.T) {
 		t.Fatalf("selected row %+v", rows[h.app.Sheet.Row])
 	}
 }
+
+// A link or image clicked in the task panel opens in the browser; behind a popup it doesn't.
+func TestClickedLinkOpens(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	var opened []string
+	h.gui.browser = func(url string) error { opened = append(opened, url); return nil }
+	h.event(func() { _ = h.gui.openLink("https://example.com/image.png", viewDetail) })
+	if len(opened) != 1 || opened[0] != "https://example.com/image.png" {
+		t.Fatalf("opened %v", opened)
+	}
+	h.wantScreen("Opened in your browser: https://example.com/image.png")
+	h.press('?') // a popup is open now
+	h.event(func() { _ = h.gui.openLink("https://example.com/other", viewDetail) })
+	if len(opened) != 1 {
+		t.Fatalf("a click behind the popup opened %v", opened)
+	}
+}

@@ -34,12 +34,15 @@ func rank(s clickup.Status) int {
 	return 1
 }
 
+// compareTasks orders like ClickUp's list view. The id comes last, so tasks that tie (say,
+// from different lists in Mine) keep a fixed order instead of the order they arrived in.
 func compareTasks(a, b *clickup.Task) int {
 	return cmp.Or(
 		cmp.Compare(rank(a.Status), rank(b.Status)),
 		cmp.Compare(a.Status.OrderIndex, b.Status.OrderIndex),
 		cmp.Compare(a.Status.Status, b.Status.Status),
 		cmp.Compare(a.OrderIndex, b.OrderIndex),
+		cmp.Compare(a.ID, b.ID),
 	)
 }
 

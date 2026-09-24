@@ -153,7 +153,9 @@ A prompt that can't read what you typed (a date, a number, a time) stays open an
 border, so you can fix the typo instead of typing it all again.
 
 The task panel renders the markdown people write in ClickUp: headings, bold, italic,
-strikethrough, code, links, bullets, numbered lists, checklists, quotes and @mentions.
+strikethrough, code, links, images, bullets, numbered lists, checklists, quotes and @mentions.
+Links and images show as short labels (an image without a name as `[image: file.png]`); click
+one to open it in your browser.
 
 ### New tasks
 

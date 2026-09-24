@@ -120,7 +120,7 @@ func (a *App) RefreshPinned() {
 				case errs[i] != nil:
 					a.log(style.Dim("Refreshing pinned " + a.Pinned[j].Label() + ": " + errs[i].Error()))
 				case a.touch[id] == touched[id]: // skip data older than a local edit
-					*a.Pinned[j] = fresh[i]
+					replace(a.Pinned[j], fresh[i])
 					a.propagate(a.Pinned[j])
 				}
 			}
@@ -129,13 +129,34 @@ func (a *App) RefreshPinned() {
 	})
 }
 
+// replace overwrites a copy of a task with newer data, except for its position. ClickUp's
+// orderindex depends on where the task came from: fetched on its own, a task reports another
+// one than in its list. Only a list load may move a row, or rows jump when you select them.
+func replace(dst *clickup.Task, src clickup.Task) {
+	old := *dst
+	*dst = src
+	dst.OrderIndex = old.OrderIndex
+	keepDetails(dst, &old)
+}
+
+// keepDetails fills in what only a task fetched on its own carries, the tracked time and the
+// subtasks, from an older copy when the newer data came from a list, which leaves them out.
+func keepDetails(dst, older *clickup.Task) {
+	if dst.TimeSpent == "" {
+		dst.TimeSpent = older.TimeSpent
+	}
+	if dst.Subtasks == nil {
+		dst.Subtasks = older.Subtasks
+	}
+}
+
 // propagate copies t into every other copy of the same task (list and pinned), so an edit
 // made through one shows everywhere.
 func (a *App) propagate(t *clickup.Task) {
 	for _, list := range [][]*clickup.Task{a.Tasks, a.Pinned} {
 		for _, other := range list {
 			if other.ID == t.ID && other != t {
-				*other = *t
+				replace(other, *t)
 			}
 		}
 	}

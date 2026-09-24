@@ -150,7 +150,8 @@ type Task struct {
 	Description         string        `json:"description,omitzero"`
 	MarkdownDescription string        `json:"markdown_description,omitzero"`
 	URL                 string        `json:"url,omitzero"`
-	List                Ref           `json:"list"`
+	List                Ref           `json:"list"`               // the home list
+	Locations           []Ref         `json:"locations,omitzero"` // other lists it's also in
 	CustomFields        []CustomField `json:"custom_fields,omitzero"`
 	TimeSpent           FlexString    `json:"time_spent,omitzero"` // ms tracked, when time tracking is on
 	Subtasks            []Task        `json:"subtasks,omitzero"`
@@ -190,6 +191,8 @@ type Comment struct {
 	CommentText string        `json:"comment_text"` // mentions come last here, see Text
 	Parts       []CommentPart `json:"comment,omitzero"`
 	User        User          `json:"user"`
+	ReplyCount  FlexString    `json:"reply_count,omitzero"`
+	Replies     []Comment     `json:"replies,omitzero"` // fetched separately, see Client.Comments
 	Date        FlexString    `json:"date"`
 	Pending     bool          `json:"-"`
 }
@@ -199,11 +202,19 @@ type CommentPart struct {
 	Text string       `json:"text,omitempty"`
 	Type string       `json:"type,omitempty"`
 	User *CommentUser `json:"user,omitempty"`
+	// Attributes is the formatting (ClickUp's editor is Quill): bold, italic, color,
+	// background, code, link on text; code-block, list, header, blockquote on a "\n".
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 type CommentUser struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username,omitempty"`
+}
+
+// Formatted reports whether the comment carries formatting beyond plain text and mentions.
+func (c Comment) Formatted() bool {
+	return slices.ContainsFunc(c.Parts, func(p CommentPart) bool { return len(p.Attributes) > 0 })
 }
 
 // Text is the comment as written. ClickUp's comment_text moves @mentions to the end, so a
