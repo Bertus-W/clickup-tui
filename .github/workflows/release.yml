@@ -1,0 +1,53 @@
+# Copies each Codeberg release to GitHub. Releases are made on Codeberg
+# (.forgejo/workflows/release.yml); when the tag arrives here through the mirror, this waits for
+# the Codeberg release, checks its checksums and publishes the same files and notes.
+# Run it by hand to copy an existing release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag: { description: "Release tag, e.g. v0.2.2", required: true }
+
+permissions:
+  contents: write
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      CODEBERG_API: https://codeberg.org/api/v1/repos/b-wisman/clickup-tui
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Wait for the Codeberg release
+        run: |
+          for _ in $(seq 90); do # 30 minutes
+            if curl -fsS "$CODEBERG_API/releases/tags/$TAG" -o release.json 2>/dev/null &&
+              [ "$(jq -r .draft release.json)" = false ]; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Codeberg has no published release for $TAG after 30 minutes"
+          exit 1
+      - name: Download it and check the checksums
+        run: |
+          mkdir dl
+          jq -r '.assets[].browser_download_url' release.json | while read -r url; do
+            curl -fsSL -o "dl/${url##*/}" "$url"
+          done
+          (cd dl && sha256sum --check --strict checksums.txt)
+      - name: Publish it here
+        run: |
+          jq -r .body release.json > notes.md
+          printf '\n\n_A copy of the [Codeberg release](https://codeberg.org/b-wisman/clickup-tui/releases/tag/%s), where development happens._\n' "$TAG" >> notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dl/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" dl/* --title "$TAG" --notes-file notes.md --verify-tag
+          fi

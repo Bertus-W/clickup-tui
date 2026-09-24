@@ -218,7 +218,8 @@ git tag -a v0.2.1 -m "cu v0.2.1" && git push origin v0.2.1
 
 Codeberg's CI (`.forgejo/workflows/release.yml`) runs the tests, builds the archives with
 `packaging/release.sh` and publishes them as the Codeberg release (`packaging/publish-codeberg.sh`).
-`packaging/release.sh v0.0.0` builds the same archives locally, into `dist/`.
+`packaging/release.sh v0.0.0` builds the same archives locally, into `dist/`. The GitHub mirror
+copies each release (`.github/workflows/release.yml`) once Codeberg has published it.
 
 ## Code
 
