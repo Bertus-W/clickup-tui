@@ -121,6 +121,7 @@ key in that list runs it.
 | `g` | go to a task by id, custom id (`DEV-123`) or URL |
 | `+` `_` | screen mode: normal → half → full |
 | `@` | toggle the command log |
+| `M` | mouse on / off: off lets the terminal select text, to copy it |
 | `R` · `q` | refresh · quit |
 
 **Tasks, Pinned and the task panel**
@@ -135,13 +136,13 @@ key in that list runs it.
 | `A` · `a` | pick the assignees (`space` toggles, `/` filters, `enter` saves) · assign or unassign me |
 | `p` · `t` | priority (`1` urgent … `4` low, `x` none) · due date (`today`, `tomorrow`, `+3d`, `fri`, `31-10` (day first), `2026-10-31`, `none`) |
 | `n` · `N` | new task · new subtask (see below) |
-| `r` · `e` | rename · edit the description in `$EDITOR` |
+| `r` · `e` | rename · edit the description in `$EDITOR` (it warns first: ClickUp's API takes descriptions as markdown, so saving loses the text colours and highlights set in ClickUp; leaving the editor without changes saves nothing) |
 | `m` | move to another list (type part of its name) |
 | `c` · `C` | comment · comment in `$EDITOR`. `@name` mentions someone; `tab` completes the name |
 | `L` | log time (see [Logging time](#logging-time)) |
 | `T` · `w` | start or stop a timer · the task's time entries (pick one to edit or delete it, `+` logs more) |
 | `P` | pin / unpin |
-| `d` · `o` · `y` | delete (asks first) · open in the browser · copy URL, id, name or a markdown link |
+| `d` · `o` · `y` | delete (asks first) · open in the browser · copy the URL, id, name, a markdown link or the description |
 | `/` · `v` · `S` | filter by name, id, status, assignee, tag or dropdown value · show closed tasks · sort by status, assignee, priority or due date (Tasks) |
 
 **Lists:** `enter` opens a list, `space` expands or collapses, `/` searches all lists.
@@ -207,6 +208,14 @@ Time tracking needs ClickUp's *Time Tracking* ClickApp enabled in the workspace.
 Click a page tab to switch pages, a panel to focus it and a row to select it; double-click a task to open it, or a timesheet
 cell to add time to it. Click the `List` / `Mine` tab to switch, scroll with the wheel, and click an
 option in a popup to pick it.
+
+In the task panel, click a property to copy it: the name, id, status, list, assignees, due date,
+tracked time or a custom field's value (it's underlined while the mouse is on it).
+
+While the app uses the mouse, the terminal can't select text, except with a key held down
+(Option in iTerm2 and Apple Terminal, Shift in most others). `M` turns the mouse off, so dragging
+selects text as usual; the tab bar shows *mouse off* until `M` turns it back on. The choice is
+remembered.
 
 ## Releases
 

@@ -166,7 +166,11 @@ func FieldsBlock(t *clickup.Task) string {
 	for _, f := range fields {
 		b.WriteString(style.Dim(style.Cell{Text: f.Name}.Fit(width)))
 		b.WriteString("  ")
-		b.WriteString(FieldText(f))
+		shown := FieldText(f)
+		if value := strings.TrimSpace(style.Strip(shown)); f.IsSet() && value != "" {
+			shown = style.Copyable(value, shown) // click to copy
+		}
+		b.WriteString(shown)
 		b.WriteString("\n")
 	}
 	return b.String()

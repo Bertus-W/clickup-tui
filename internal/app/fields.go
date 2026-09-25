@@ -181,7 +181,7 @@ func (a *App) askField(f clickup.CustomField, save func(fieldEdit)) {
 		var current string
 		_ = json.Unmarshal(f.Value, &current)
 		a.UI.Edit(f.Name, current, func(edited string) {
-			edited = strings.TrimSpace(edited)
+			edited = strings.TrimSpace(editorText(edited))
 			switch {
 			case edited == strings.TrimSpace(current):
 			case edited == "":

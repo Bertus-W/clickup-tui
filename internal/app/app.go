@@ -133,6 +133,8 @@ type App struct {
 	Timer         *clickup.TimeEntry // the running timer, if any
 
 	selIndex     int
+	pinnedAt     time.Time // when pinned tasks outside the list were last fetched
+	pinnedDue    bool      // fetch them once the list load in flight is done
 	seq          map[string]uint64
 	tasksKey     string                      // view the task list was loaded for
 	touch        map[string]uint64           // per task: bumped when an edit starts or ends
@@ -145,7 +147,7 @@ func New(api *clickup.Client, c *cache.Cache, ui UI, async Async) *App {
 	a := &App{
 		API: api, Cache: c, UI: ui, Async: async,
 		Now:      time.Now,
-		Debounce: 150 * time.Millisecond,
+		Debounce: 400 * time.Millisecond, // a pause, not the gap between two key presses
 		View:     MyTasks,
 		seq:      map[string]uint64{},
 		touch:    map[string]uint64{},
@@ -388,7 +390,7 @@ func (a *App) LoadTasks(quiet bool) {
 			values = append(values, page...)
 			if !hit {
 				partial := pointers(values)
-				apply(func() { a.Loading = false; a.setTasks(a.keepLocal(partial, true, touched)) })
+				apply(func() { a.Loading = false; a.setTasks(a.keepLocal(partial, true, touched)); a.syncPinned() })
 			}
 		}
 		freshJSON, _ := json.Marshal(values)
@@ -399,6 +401,11 @@ func (a *App) LoadTasks(quiet bool) {
 			a.Loading = false
 			if changed {
 				a.setTasks(a.keepLocal(all, true, touched))
+				a.syncPinned()
+			}
+			if a.pinnedDue { // now the list is current, fetch the pinned tasks it doesn't hold
+				a.pinnedDue = false
+				a.refreshPinned(true)
 			}
 		})
 	})
@@ -549,57 +556,91 @@ func (a *App) SwitchTab() {
 
 // --- detail ----------------------------------------------------------------------------------
 
-// LoadDetail shows t (and cached comments) now, then fetches the full task and comments.
-func (a *App) LoadDetail(t *clickup.Task) {
-	if full, _, ok := cache.Get[clickup.Task](a.Cache, "task:"+t.ID); ok && t.Subtasks == nil {
+// detailFresh is how long a task's details and comments count as current: browsing back to a
+// task within it costs no requests.
+const detailFresh = 2 * time.Minute
+
+// LoadDetail shows t (and its cached comments) now, then fetches its details and comments,
+// except what was fetched in the last two minutes and hasn't changed since (the list says when
+// a task last changed). Scrolling past tasks fetches nothing: the fetch waits for a pause.
+func (a *App) LoadDetail(t *clickup.Task) { a.loadDetail(t, false) }
+
+// ReloadDetail is LoadDetail that always fetches: after a refresh, or a change it can't see.
+func (a *App) ReloadDetail(t *clickup.Task) { a.loadDetail(t, true) }
+
+func (a *App) loadDetail(t *clickup.Task, force bool) {
+	full, fullAt, haveFull := cache.Get[clickup.Task](a.Cache, "task:"+t.ID)
+	if haveFull && t.Subtasks == nil {
 		t.Subtasks = full.Subtasks
 	}
-	a.Detail = t
-	a.Comments = cache.Value[[]clickup.Comment](a.Cache, "comments:"+t.ID, nil)
+	comments, commentsAt, haveComments := cache.Get[[]clickup.Comment](a.Cache, "comments:"+t.ID)
+	a.Detail, a.Comments = t, comments
 	if t.Pending {
+		return
+	}
+	// The cache's timestamps are wall-clock times, so its ages use the real clock.
+	needTask := force || !haveFull || time.Since(fullAt) > detailFresh || full.DateUpdated != t.DateUpdated
+	needComments := force || !haveComments || time.Since(commentsAt) > detailFresh
+	if !needTask {
+		keepDetails(t, &full) // the tracked time only comes with the full task
+	}
+	if !needTask && !needComments {
+		a.seq["detail"]++ // an older fetch still in flight is for another task
 		return
 	}
 	id, touched := t.ID, a.touch[t.ID]
 	a.run("detail", func(ctx context.Context, apply func(func())) {
 		if a.Debounce > 0 {
-			select { // debounce while scrolling through the list
+			select { // wait for a pause while scrolling through the list
 			case <-ctx.Done():
 				return
 			case <-time.After(a.Debounce):
 			}
 		}
-		var full clickup.Task
-		var comments []clickup.Comment
+		var fresh clickup.Task
+		var freshComments []clickup.Comment
 		var errTask, errComments error
 		var wg sync.WaitGroup
-		wg.Go(func() { full, errTask = a.API.GetTask(ctx, id, "") })
-		wg.Go(func() { comments, errComments = a.API.Comments(ctx, id) })
-		wg.Wait()
-		if errTask == nil && errComments == nil {
-			_ = cache.Put(a.Cache, "task:"+id, full)
-			_ = cache.Put(a.Cache, "comments:"+id, comments)
+		if needTask {
+			wg.Go(func() {
+				if fresh, errTask = a.API.GetTask(ctx, id, ""); errTask == nil {
+					_ = cache.Put(a.Cache, "task:"+id, fresh)
+				}
+			})
 		}
+		if needComments {
+			wg.Go(func() {
+				if freshComments, errComments = a.API.Comments(ctx, id); errComments == nil {
+					_ = cache.Put(a.Cache, "comments:"+id, freshComments)
+				}
+			})
+		}
+		wg.Wait()
 		apply(func() {
 			if err := cmp.Or(errTask, errComments); err != nil {
 				a.error("Loading task", err)
+				return
+			}
+			shown := a.Detail != nil && a.Detail.ID == id
+			if needComments && shown {
+				a.Comments = freshComments
+			}
+			if !needTask {
 				return
 			}
 			target := t
 			if !slices.Contains(a.Pinned, t) {
 				target = a.live(t) // a list reload may have replaced the object meanwhile
 			}
-			changed := full.DateUpdated != target.DateUpdated
+			changed := fresh.DateUpdated != target.DateUpdated
 			if a.touch[id] == touched { // an edit since the fetch started is newer than this data
-				replace(target, full)
+				replace(target, fresh)
 				a.propagate(target)
 			} else {
 				changed = false
 			}
-			if a.Detail != nil && a.Detail.ID == id {
-				if !slices.Contains(a.Pinned, a.Detail) {
-					a.Detail = target
-				}
-				a.Comments = comments
+			if shown && !slices.Contains(a.Pinned, a.Detail) {
+				a.Detail = target
 			}
 			if changed && a.find(id) == target {
 				a.persistView()
@@ -631,14 +672,16 @@ func (a *App) Refresh() {
 		a.LoadWeek()
 	}
 	if a.Detail != nil && !a.Detail.Pending {
-		a.LoadDetail(a.Detail)
+		a.ReloadDetail(a.Detail)
 	}
 }
 
 // AutoRefresh quietly reloads the current view when nothing else is happening.
 func (a *App) AutoRefresh() {
 	if a.TeamID != "" && !a.Busy() {
+		// The list load also updates pinned tasks that are in the list (syncPinned), and when it's
+		// done fetches the others if that's due.
+		a.pinnedDue = a.pinnedDue || a.Now().Sub(a.pinnedAt) >= pinnedEvery
 		a.LoadTasks(true)
-		a.RefreshPinned()
 	}
 }

@@ -61,6 +61,7 @@ type scriptUI struct {
 	focus       app.Panel
 	form        *app.Form
 	clipboard   string
+	editorText  string // what the editor last opened with
 }
 
 func (s *scriptUI) next(title string) any {
@@ -133,7 +134,8 @@ func (s *scriptUI) Confirm(title, _ string, onYes func()) {
 	}
 }
 
-func (s *scriptUI) Edit(title, _ string, onDone func(string)) {
+func (s *scriptUI) Edit(title, initial string, onDone func(string)) {
+	s.editorText = initial
 	if text, ok := s.next(title).(string); ok {
 		onDone(text)
 	}
@@ -323,7 +325,7 @@ func TestPriorityDueAndDescription(t *testing.T) {
 	if got := render.DueCell(new(h.fake.Task("t1")), time.Now()).Text; got != "Jan 2030" {
 		t.Fatalf("due = %q", got)
 	}
-	h.do((*app.App).EditDescription, "New *body*")
+	h.do((*app.App).EditDescription, true, "New *body*") // yes, edit
 	if got := h.fake.Task("t1").MarkdownDescription; got != "New *body*" {
 		t.Fatalf("server description = %q", got)
 	}
@@ -485,6 +487,10 @@ func TestCopyMenu(t *testing.T) {
 	h := newHarness(t, fake.Basic(5), nil).boot()
 	h.do((*app.App).CopyMenu, 'm')
 	if want := "[Task number 1](https://app.clickup.com/t/t1)"; h.ui.clipboard != want {
+		t.Fatalf("clipboard = %q", h.ui.clipboard)
+	}
+	h.do((*app.App).CopyMenu, 'd') // the whole description, as markdown
+	if want := "Description of **task 1**"; h.ui.clipboard != want {
 		t.Fatalf("clipboard = %q", h.ui.clipboard)
 	}
 }
@@ -1047,5 +1053,117 @@ func TestCommentThreadReplies(t *testing.T) {
 		if !strings.Contains(panel, want) {
 			t.Errorf("task panel lacks %q:\n%s", want, panel)
 		}
+	}
+}
+
+// Stepping through the list at a normal pace (a key press every 300ms) fetches nothing until
+// you stop: then only the task you stopped on.
+func TestSteppingThroughTasksFetchesOnlyWhereYouStop(t *testing.T) {
+	c, _ := cache.Open(":memory:")
+	defer c.Close()
+	if d := app.New(fake.Basic(1).Client(), c, &scriptUI{t: t}, &testAsync{}).Debounce; d < 400*time.Millisecond {
+		t.Fatalf("the default wait is %v, shorter than the gap between key presses", d)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		srv := fake.Basic(10)
+		h := newHarness(t, srv, nil)
+		h.boot()
+		h.do(func(a *app.App) { a.OpenView(backlog) })
+		h.app.Debounce = 400 * time.Millisecond
+		before := len(srv.Requests)
+		for i := range 10 {
+			h.async.UI(func() { h.app.Select(i) })
+			time.Sleep(300 * time.Millisecond)
+		}
+		h.async.wg.Wait()
+		fetched := srv.Requests[before:]
+		if want := []string{"GET /api/v2/task/t10", "GET /api/v2/task/t10/comment"}; !slices.Equal(slices.Sorted(slices.Values(fetched)), want) {
+			t.Fatalf("requests = %v, want only the last task: %v", fetched, want)
+		}
+	})
+}
+
+// Pinned tasks in the task list come along with its refresh; the others are fetched every
+// five minutes, not every minute.
+func TestPinnedRefreshIsFrugal(t *testing.T) {
+	srv := fake.Basic(5)
+	h := newHarness(t, srv, nil)
+	clock := time.Date(2026, 9, 25, 10, 0, 0, 0, time.Local)
+	h.app.Now = func() time.Time { return clock }
+	h.boot()
+	h.do(func(a *app.App) { a.OpenView(backlog) })
+	h.do(func(a *app.App) { a.Select(0) })
+	h.do((*app.App).TogglePin)         // t1: in the list
+	clock = clock.Add(5 * time.Minute) // the fetch at start is five minutes ago
+	h.do(func(a *app.App) { a.OpenView(app.View{Kind: "list", ID: "L2", Name: "Inbox"}) })
+	h.do(func(a *app.App) { a.OpenView(backlog) })
+	srv.Tasks["t5"].List = clickup.Ref{ID: "L2", Name: "Inbox"} // t5 lives elsewhere now…
+	h.do(func(a *app.App) { a.Select(4) })
+	h.do((*app.App).TogglePin) // …and is pinned too
+
+	srv.Tasks["t1"].Name = "Renamed in ClickUp"
+	srv.Tasks["t1"].DateUpdated = "1800000000000"
+	count := func() (t1, t5 int) { return srv.Count("GET /api/v2/task/t1"), srv.Count("GET /api/v2/task/t5") }
+	t1, t5 := count()
+	h.do((*app.App).AutoRefresh)
+	if n1, _ := count(); n1 != t1 {
+		t.Error("fetched the pinned task that's in the list on its own")
+	}
+	if p := h.app.Pinned[0]; p.Name != "Renamed in ClickUp" {
+		t.Errorf("pinned copy didn't follow the list: %q", p.Name)
+	}
+	if _, n5 := count(); n5 != t5+1 {
+		t.Fatalf("the pinned task outside the list: %d fetches, want 1", n5-t5)
+	}
+	for range 4 { // the next minutes: nothing for it
+		clock = clock.Add(time.Minute)
+		h.do((*app.App).AutoRefresh)
+	}
+	if _, n5 := count(); n5 != t5+1 {
+		t.Errorf("fetched again within five minutes: %d", n5-t5)
+	}
+	clock = clock.Add(time.Minute)
+	h.do((*app.App).AutoRefresh)
+	if _, n5 := count(); n5 != t5+2 {
+		t.Errorf("not fetched after five minutes: %d", n5-t5)
+	}
+}
+
+// Saving the description unchanged sends nothing: not even when the editor wrote Windows line
+// endings or a byte order mark. (A save rebuilds the description from markdown, which would drop
+// text colours.)
+func TestUnchangedDescriptionIsNotSaved(t *testing.T) {
+	srv := fake.Basic(3)
+	srv.Tasks["t1"].MarkdownDescription = "Line one\n\n- a point\n"
+	h := newHarness(t, srv, nil).boot()
+	puts := func() int { return srv.Count("PUT /api/v2/task/t1") }
+	for _, saved := range []string{
+		"Line one\n\n- a point\n",
+		"Line one\n\n- a point",               // an editor that drops the last newline
+		"Line one\r\n\r\n- a point\r\n",       // Notepad's line endings
+		"\ufeffLine one\r\n\r\n- a point\r\n", // and its byte order mark
+	} {
+		h.do((*app.App).EditDescription, true, saved)
+		if puts() != 0 {
+			t.Fatalf("saving %q unchanged sent an update", saved)
+		}
+	}
+	h.do((*app.App).EditDescription, true, "Line one\r\n\r\n- a new point\r\n")
+	if puts() != 1 || srv.Task("t1").MarkdownDescription != "Line one\n\n- a new point\n" {
+		t.Fatalf("%d updates, description %q", puts(), srv.Task("t1").MarkdownDescription)
+	}
+}
+
+// e warns before the editor opens: saving drops ClickUp-only formatting. No means no editor.
+func TestDescriptionWarnsBeforeEditing(t *testing.T) {
+	srv := fake.Basic(3)
+	h := newHarness(t, srv, nil).boot()
+	h.do((*app.App).EditDescription, false) // no: the editor doesn't open (it would ask for an answer)
+	if h.ui.titles[len(h.ui.titles)-1] != "Edit description?" {
+		t.Fatalf("popups %v", h.ui.titles)
+	}
+	h.do((*app.App).EditDescription, true, "Edited") // yes, then a change: saved without asking again
+	if got := srv.Task("t1").MarkdownDescription; got != "Edited" {
+		t.Fatalf("description = %q", got)
 	}
 }

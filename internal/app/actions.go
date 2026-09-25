@@ -290,14 +290,30 @@ func (a *App) EditDescription() {
 	if t == nil {
 		return
 	}
+	// Warn before editing: ClickUp's API only takes descriptions as markdown, so saving replaces
+	// the description and drops what markdown can't hold (text colours, highlights).
 	current := t.Body()
-	a.UI.Edit("Description · "+t.Label(), current, func(edited string) {
-		if strings.TrimSpace(edited) == strings.TrimSpace(current) {
-			return
-		}
-		a.update(t, "Description updated", func(t *clickup.Task) { t.MarkdownDescription = edited },
-			map[string]any{"markdown_content": edited})
-	})
+	a.UI.Confirm("Edit description?", "Saving replaces the description in ClickUp with markdown: "+
+		"text colours and highlights set in ClickUp will be lost.\n\n"+
+		"To keep it as it is, leave the editor without changes.",
+		func() {
+			a.UI.Edit("Description · "+t.Label(), current, func(edited string) {
+				// Unchanged means no request. Editors that save Windows line endings or a byte
+				// order mark (Notepad) don't count as a change.
+				edited = editorText(edited)
+				if strings.TrimSpace(edited) == strings.TrimSpace(editorText(current)) {
+					return
+				}
+				a.update(t, "Description updated", func(t *clickup.Task) { t.MarkdownDescription = edited },
+					map[string]any{"markdown_content": edited})
+			})
+		})
+}
+
+// editorText undoes what editors add to a file without anyone typing it: Windows line endings
+// and a UTF-8 byte order mark.
+func editorText(s string) string {
+	return strings.ReplaceAll(strings.TrimPrefix(s, "\ufeff"), "\r\n", "\n")
 }
 
 func hasUser(users []clickup.User, id int64) bool {
@@ -518,7 +534,7 @@ func (a *App) Comment() {
 
 func (a *App) CommentInEditor() {
 	if t := a.current(); t != nil {
-		a.UI.Edit("Comment · "+t.Label(), "", func(text string) { a.postComment(t, text) })
+		a.UI.Edit("Comment · "+t.Label(), "", func(text string) { a.postComment(t, editorText(text)) })
 	}
 }
 
@@ -613,13 +629,20 @@ func (a *App) CopyMenu() {
 	items = append(items,
 		MenuItem{'n', "Task name", t.Name},
 		MenuItem{'m', "Markdown link", fmt.Sprintf("[%s](%s)", t.Name, t.URL)})
+	if body := strings.TrimSpace(t.Body()); body != "" {
+		items = append(items, MenuItem{'d', "Description (markdown)", body})
+	}
 	a.UI.Menu("Copy to clipboard", items, 0, func(item MenuItem) {
 		text := item.Value.(string)
 		if err := a.UI.Clipboard(text); err != nil {
 			a.error("Copy", err)
 			return
 		}
-		a.UI.Notify(Info, "Copied: "+text)
+		shown, _, multiline := strings.Cut(text, "\n")
+		if r := []rune(shown); len(r) > 60 || multiline {
+			shown = string(r[:min(len(r), 60)]) + "…"
+		}
+		a.UI.Notify(Info, "Copied: "+shown)
 	})
 }
 

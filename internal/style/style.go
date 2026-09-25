@@ -4,6 +4,7 @@ package style
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -138,6 +139,24 @@ func Link(url, text string) string {
 		return r
 	}, url)
 	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+// copyScheme marks a link that copies its value instead of opening it.
+const copyScheme = "cu-copy:"
+
+// Copyable makes shown a link that copies value when clicked (see Copied).
+func Copyable(value, shown string) string {
+	return Link(copyScheme+url.PathEscape(value), shown)
+}
+
+// Copied returns the value of a Copyable link, and whether link is one.
+func Copied(link string) (string, bool) {
+	rest, ok := strings.CutPrefix(link, copyScheme)
+	if !ok {
+		return "", false
+	}
+	value, err := url.PathUnescape(rest)
+	return value, err == nil
 }
 
 // Strip removes escape codes.

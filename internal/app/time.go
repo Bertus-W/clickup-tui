@@ -542,7 +542,7 @@ func (a *App) persistWeek() {
 func (a *App) afterTimeChange(taskID string) {
 	a.persistWeek()
 	if a.Detail != nil && a.Detail.ID == taskID && !a.Detail.Pending {
-		a.LoadDetail(a.Detail)
+		a.ReloadDetail(a.Detail) // the tracked time changed, which the list can't tell
 	}
 }
 

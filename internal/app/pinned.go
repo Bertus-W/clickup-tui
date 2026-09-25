@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"time"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/cache"
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
@@ -85,13 +86,24 @@ func (a *App) SelectPinned(i int) {
 }
 
 // RefreshPinned fetches all pinned tasks in parallel. Tasks deleted in ClickUp are unpinned.
-func (a *App) RefreshPinned() {
-	if len(a.Pinned) == 0 {
-		return
+func (a *App) RefreshPinned() { a.refreshPinned(false) }
+
+// pinnedEvery is how often the automatic refresh fetches pinned tasks that aren't in the task
+// list; those that are get updated with the list, for free (syncPinned).
+const pinnedEvery = 5 * time.Minute
+
+// refreshPinned fetches the pinned tasks, or with outsideList only those the task list doesn't
+// hold, one request each.
+func (a *App) refreshPinned(outsideList bool) {
+	a.pinnedAt = a.Now()
+	var ids []string
+	for _, t := range a.Pinned {
+		if !outsideList || a.find(t.ID) == nil {
+			ids = append(ids, t.ID)
+		}
 	}
-	ids := make([]string, len(a.Pinned))
-	for i, t := range a.Pinned {
-		ids[i] = t.ID
+	if len(ids) == 0 {
+		return
 	}
 	touched := maps.Clone(a.touch)
 	a.run("pinned", func(ctx context.Context, apply func(func())) {
@@ -127,6 +139,21 @@ func (a *App) RefreshPinned() {
 			a.persistPinned()
 		})
 	})
+}
+
+// syncPinned updates pinned tasks that are also in the freshly loaded task list from it, so they
+// need no request of their own.
+func (a *App) syncPinned() {
+	changed := false
+	for _, p := range a.Pinned {
+		if row := a.find(p.ID); row != nil && !row.Pending && row.DateUpdated.Int() > p.DateUpdated.Int() {
+			replace(p, *row)
+			changed = true
+		}
+	}
+	if changed {
+		a.persistPinned()
+	}
 }
 
 // replace overwrites a copy of a task with newer data, except for its position. ClickUp's

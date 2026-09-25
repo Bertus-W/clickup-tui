@@ -318,6 +318,8 @@ func TestPromptEditorAndConfirm(t *testing.T) {
 	h := newHarness(t, fake.Basic(5))
 	h.edited = "Rewritten in **vim**"
 	h.press('e')
+	h.wantScreen("Edit description?", "text colours and highlights set in ClickUp will be lost")
+	h.press('y') // the editor opens, and its edit is saved
 	if got := h.fake.Task("t1").MarkdownDescription; got != h.edited {
 		t.Fatalf("description = %q", got)
 	}
@@ -897,5 +899,62 @@ func TestClickedLinkOpens(t *testing.T) {
 	h.event(func() { _ = h.gui.openLink("https://example.com/other", viewDetail) })
 	if len(opened) != 1 {
 		t.Fatalf("a click behind the popup opened %v", opened)
+	}
+}
+
+// M turns the mouse off so the terminal selects text again, says so in the tab bar, and
+// remembers it.
+func TestMouseToggle(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	if !h.gui.g.Mouse {
+		t.Fatal("the mouse starts on")
+	}
+	h.press('M')
+	if h.gui.g.Mouse {
+		t.Fatal("M should turn the mouse off")
+	}
+	h.wantScreen("mouse off · M", "Mouse off: drag to select text")
+	if cache.Value(h.app.Cache, "ui:mouse", true) {
+		t.Error("the choice isn't remembered")
+	}
+	h.press('H', 'M') // the timesheet too
+	if !h.gui.g.Mouse || strings.Contains(h.screen(), "mouse off") {
+		t.Fatal("M should turn the mouse back on")
+	}
+}
+
+// Clicking a property in the task panel copies it; a real link still opens.
+func TestClickedPropertyCopies(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	var copied, opened []string
+	h.gui.clipboard = func(s string) error { copied = append(copied, s); return nil }
+	h.gui.browser = func(s string) error { opened = append(opened, s); return nil }
+	h.event(func() { _ = h.gui.openLink("cu-copy:DEV-1", viewDetail) })
+	h.wantScreen("Copied: DEV-1")
+	h.event(func() { _ = h.gui.openLink("https://example.com", viewDetail) })
+	if len(copied) != 1 || copied[0] != "DEV-1" || len(opened) != 1 {
+		t.Fatalf("copied %v, opened %v", copied, opened)
+	}
+	h.wantScreen("Opened in your browser: https://example.com")
+}
+
+// No periodic refresh while the terminal window isn't focused; coming back refreshes once.
+func TestNoRefreshWhileUnfocused(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	lists := func() int { return h.fake.Count("GET /api/v2/team/T1/task") }
+	n := lists()
+	h.event(func() { _ = h.gui.onFocus(false) })
+	h.event(h.gui.autoRefresh)
+	if lists() != n {
+		t.Fatal("refreshed while unfocused")
+	}
+	h.event(func() { _ = h.gui.onFocus(true) }) // back: the refresh it skipped
+	if lists() != n+1 {
+		t.Fatalf("%d refreshes coming back, want 1", lists()-n)
+	}
+	h.event(func() { _ = h.gui.onFocus(false) })
+	h.event(func() { _ = h.gui.onFocus(true) }) // back within a minute: nothing to catch up
+	if lists() != n+1 {
+		t.Fatalf("%d refreshes, want 1", lists()-n)
 	}
 }

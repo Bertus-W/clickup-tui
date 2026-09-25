@@ -155,3 +155,31 @@ func TestCodeBlocks(t *testing.T) {
 		t.Errorf("unclosed = %q", got)
 	}
 }
+
+// Every property in the task panel copies its value when clicked; empty fields don't.
+func TestDetailPropertiesAreCopyable(t *testing.T) {
+	task := &clickup.Task{ID: "t1", CustomID: "DEV-1", Name: "Fix login", List: clickup.Ref{Name: "Backlog"},
+		Status: clickup.Status{Status: "in progress"}, Assignees: []clickup.User{{Username: "alice"}},
+		CustomFields: []clickup.CustomField{
+			{Name: "Estimate", Type: "number", Value: json.RawMessage(`3`)},
+			{Name: "Empty", Type: "short_text"},
+		}}
+	out := Detail(task, nil, time.Now(), 80)
+	for value, shown := range map[string]string{
+		"Fix login": style.Bold("Fix login"), "DEV-1": style.Dim("DEV-1"), "Backlog": style.Dim("Backlog"),
+		"alice": "alice",
+	} {
+		if !strings.Contains(out, style.Copyable(value, shown)) {
+			t.Errorf("%q isn't copyable", value)
+		}
+	}
+	if !strings.Contains(out, "cu-copy:in%20progress") || !strings.Contains(out, "cu-copy:3") {
+		t.Error("the status or the field value isn't copyable")
+	}
+	if strings.Contains(out, "cu-copy:%E2%80%94") { // "—", an empty field
+		t.Error("an empty field is copyable")
+	}
+	if v, ok := style.Copied("cu-copy:in%20progress"); !ok || v != "in progress" {
+		t.Errorf("Copied = %q, %v", v, ok)
+	}
+}

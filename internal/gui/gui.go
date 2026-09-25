@@ -20,6 +20,7 @@ import (
 	"github.com/jesseduffield/gocui"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/app"
+	"codeberg.org/b-wisman/clickup-tui/internal/cache"
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
 	"codeberg.org/b-wisman/clickup-tui/internal/render"
 	"codeberg.org/b-wisman/clickup-tui/internal/style"
@@ -95,9 +96,13 @@ type Gui struct {
 	toastUntil time.Time
 	spin       int
 
-	// editor opens text in $EDITOR, browser opens a URL; tests replace them.
-	editor  func(initial string) (string, bool, error)
-	browser func(url string) error
+	unfocused   bool      // the terminal window lost focus: no periodic refresh
+	refreshedAt time.Time // the last periodic refresh
+
+	// editor opens text in $EDITOR, browser opens a URL, clipboard copies; tests replace them.
+	editor    func(initial string) (string, bool, error)
+	browser   func(url string) error
+	clipboard func(text string) error
 }
 
 type Options struct {
@@ -118,7 +123,7 @@ func New(opts Options) (*Gui, error) {
 		return nil, err
 	}
 	gui := &Gui{g: g, panel: viewTasks, lastList: viewTasks, showLog: true, expanded: map[string]bool{}}
-	gui.editor, gui.browser = gui.runEditor, openURL
+	gui.editor, gui.browser, gui.clipboard = gui.runEditor, openURL, copyToClipboard
 	gui.async = opts.Async
 	if gui.async == nil {
 		gui.async = newAsync(g)
@@ -138,13 +143,29 @@ func New(opts Options) (*Gui, error) {
 		return nil, err
 	}
 	g.SetOpenHyperlinkFunc(gui.openLink)
+	g.SetFocusHandler(gui.onFocus)
 	return gui, nil
 }
 
 // Async is what the app uses to schedule work; see app.Async.
 func (gui *Gui) Async() app.Async { return gui.async }
 
-func (gui *Gui) Attach(a *app.App) { gui.App = a }
+func (gui *Gui) Attach(a *app.App) {
+	gui.App = a
+	gui.g.Mouse = cache.Value(a.Cache, "ui:mouse", true)
+}
+
+// toggleMouse turns mouse support off, so the terminal selects and copies text again, and back
+// on. The choice is remembered.
+func (gui *Gui) toggleMouse() {
+	gui.g.Mouse = !gui.g.Mouse
+	_ = cache.Put(gui.App.Cache, "ui:mouse", gui.g.Mouse)
+	if gui.g.Mouse {
+		gui.Notify(app.Info, "Mouse on")
+	} else {
+		gui.Notify(app.Info, "Mouse off: drag to select text and copy it. M turns the mouse back on.")
+	}
+}
 
 // Run starts the event loop until the user quits.
 func (gui *Gui) Run() error {
@@ -170,13 +191,28 @@ func (gui *Gui) ticker() {
 				gui.async.UI(func() { gui.spin++ })
 			}
 		case <-refresh.C:
-			gui.async.UI(func() {
-				if gui.popup == nil {
-					gui.App.AutoRefresh()
-				}
-			})
+			gui.async.UI(gui.autoRefresh)
 		}
 	}
+}
+
+// autoRefresh is the periodic refresh: skipped while a popup is open or the terminal window
+// isn't focused (nobody's looking, so it would only spend ClickUp's rate limit).
+func (gui *Gui) autoRefresh() {
+	if gui.popup == nil && !gui.unfocused {
+		gui.refreshedAt = time.Now()
+		gui.App.AutoRefresh()
+	}
+}
+
+// onFocus follows the terminal window's focus; coming back, it refreshes if that's overdue.
+// Terminals that don't report focus never call it, and keep refreshing as usual.
+func (gui *Gui) onFocus(focused bool) error {
+	gui.unfocused = !focused
+	if focused && time.Since(gui.refreshedAt) >= time.Minute {
+		gui.autoRefresh()
+	}
+	return nil
 }
 
 // --- layout -------------------------------------------------------------------------------
@@ -332,6 +368,7 @@ func (gui *Gui) initView(v *gocui.View) {
 		v.TitlePrefix = "[0]"
 		v.Title = "Task"
 		v.Wrap = true
+		v.UnderlineHyperLinksOnlyOnHover = true // properties are clickable (they copy): show it on hover
 	case viewLog:
 		v.Title = "Command log"
 		v.Autoscroll = true
@@ -689,14 +726,22 @@ func (gui *Gui) Notify(level app.Level, msg string) {
 
 func (gui *Gui) Refresh() {} // gocui redraws after every event and UI update
 
-func (gui *Gui) Clipboard(text string) error { return copyToClipboard(text) }
+func (gui *Gui) Clipboard(text string) error { return gui.clipboard(text) }
 func (gui *Gui) OpenURL(url string) error    { return gui.browser(url) }
 
-// openLink opens a link or image clicked in the task panel (markdown links are hyperlinks,
-// see style.Link) in the browser.
+// openLink handles a click on a link in the task panel (see style.Link): a property copies its
+// value (style.Copyable), a link or image opens in the browser.
 func (gui *Gui) openLink(link, view string) error {
 	if gui.popup != nil || view != viewDetail {
 		return nil // clicks behind a popup don't count
+	}
+	if value, ok := style.Copied(link); ok {
+		if err := gui.clipboard(value); err != nil {
+			gui.Notify(app.Error, "Copy: "+err.Error())
+			return nil
+		}
+		gui.Notify(app.Info, "Copied: "+value)
+		return nil
 	}
 	if err := gui.browser(link); err != nil {
 		gui.Notify(app.Error, "Opening "+link+": "+err.Error())

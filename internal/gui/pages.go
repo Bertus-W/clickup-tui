@@ -70,6 +70,9 @@ func (gui *Gui) renderPages(maxX int) error {
 	if right == "" {
 		right = style.Dim("H timesheet · esc back")
 	}
+	if !gui.g.Mouse { // otherwise easy to forget: clicks do nothing
+		right = style.Yellow("mouse off · M") + "  " + right
+	}
 	left := b.String()
 	gap := maxX - 2 - style.Width(left) - style.Width(right)
 	if gap < 1 {

@@ -18,38 +18,44 @@ import (
 // Detail renders the task panel: title, meta, custom fields, description, subtasks and comments.
 // width is the panel's inner width: code blocks are boxes that span it.
 func Detail(t *clickup.Task, comments []clickup.Comment, now time.Time, width int) string {
+	// Every property is Copyable: clicking it copies it (the underline shows on hover).
+	copyable := style.Copyable
 	var b strings.Builder
-	b.WriteString("\n" + style.Bold(t.Name) + "\n\n")
+	b.WriteString("\n" + copyable(t.Name, style.Bold(t.Name)) + "\n\n")
 
-	b.WriteString(StatusCell(t).Fit(style.Width(StatusCell(t).Text)))
+	status := StatusCell(t)
+	b.WriteString(copyable(t.Status.Status, status.Fit(style.Width(status.Text))))
 	if t.Priority != nil {
-		b.WriteString("   " + PriorityFlag(t, true))
+		b.WriteString("   " + copyable(t.Priority.Priority, PriorityFlag(t, true)))
 	}
 	if due := DueCell(t, now); due.Text != "" {
-		b.WriteString("   due " + due.Fit(len(due.Text)))
+		day, _ := Millis(t.DueDate)
+		b.WriteString("   due " + copyable(day.Format(time.DateOnly), due.Fit(len(due.Text))))
 	}
 	b.WriteString("\n")
 	people := make([]string, len(t.Assignees))
 	for i, a := range t.Assignees {
-		people[i] = a.Username
+		people[i] = copyable(a.Username, a.Username)
 	}
 	// No emoji here: terminals disagree on their width, which breaks panel borders.
 	b.WriteString(style.Dim("assigned ") + cmp.Or(strings.Join(people, ", "), style.Dim("nobody")))
 	for _, tag := range t.Tags {
-		b.WriteString(" " + style.Chip("#"+tag.Name, tag.TagBg))
+		b.WriteString(" " + copyable(tag.Name, style.Chip("#"+tag.Name, tag.TagBg)))
 	}
 	b.WriteString("\n")
-	meta := []string{t.Label()}
+	meta := []string{copyable(t.Label(), style.Dim(t.Label()))}
 	if t.List.Name != "" {
-		meta = append(meta, t.List.Name)
+		meta = append(meta, copyable(t.List.Name, style.Dim(t.List.Name)))
 	}
 	if updated, ok := Millis(t.DateUpdated); ok {
-		meta = append(meta, "updated "+updated.Format("2006-01-02 15:04"))
+		when := updated.Format("2006-01-02 15:04")
+		meta = append(meta, style.Dim("updated ")+copyable(when, style.Dim(when)))
 	}
 	if spent := t.TimeSpent.Int(); spent > 0 {
-		meta = append(meta, "tracked "+parse.Hours(time.Duration(spent)*time.Millisecond))
+		hours := parse.Hours(time.Duration(spent) * time.Millisecond)
+		meta = append(meta, style.Dim("tracked ")+copyable(hours, style.Dim(hours)))
 	}
-	b.WriteString(style.Dim(strings.Join(meta, "  ·  ")) + "\n\n")
+	b.WriteString(strings.Join(meta, style.Dim("  ·  ")) + "\n\n")
 
 	if len(t.CustomFields) > 0 {
 		b.WriteString(FieldsBlock(t) + "\n")

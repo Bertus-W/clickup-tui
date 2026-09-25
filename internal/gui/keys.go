@@ -98,6 +98,7 @@ func (gui *Gui) keymap() []binding {
 		{panels, []any{'+'}, "Next screen mode", false, false, do(func() { gui.mode = (gui.mode + 1) % 3 })},
 		{panels, []any{'_'}, "Previous screen mode", false, false, do(func() { gui.mode = (gui.mode + 2) % 3 })},
 		{panels, []any{'@'}, "Toggle command log", false, false, do(func() { gui.showLog = !gui.showLog })},
+		{append(slices.Clone(panels), viewSheet), []any{'M'}, "Mouse on/off (off: select text to copy)", false, false, do(gui.toggleMouse)},
 		{panels, []any{'J', gocui.KeyCtrlD}, "Scroll task down", false, true, do(func() { gui.scrollDetail(gui.pageSize(viewDetail) / 2) })},
 		{panels, []any{'K', gocui.KeyCtrlU}, "Scroll task up", false, true, do(func() { gui.scrollDetail(-gui.pageSize(viewDetail) / 2) })},
 		{panels, []any{'0'}, "Focus task panel", false, true, do(func() { gui.focus(viewDetail) })},
