@@ -67,6 +67,29 @@ func TestTableShowsDropdownColumnsWhenThereIsRoom(t *testing.T) {
 	}
 }
 
+func TestTableShowsDependencies(t *testing.T) {
+	dep := clickup.Dependency{TaskID: "waits", DependsOn: "blocks"}
+	waits := &clickup.Task{ID: "waits", Name: "Waits", Dependencies: []clickup.Dependency{dep}}
+	blocks := &clickup.Task{ID: "blocks", Name: "Blocks", Dependencies: []clickup.Dependency{dep}}
+	free := &clickup.Task{ID: "free", Name: "Free"}
+	tbl := NewTable([]*clickup.Task{waits, blocks, free}, 90, false)
+	for _, c := range []struct {
+		task *clickup.Task
+		want string
+	}{{waits, style.Red("⊘")}, {blocks, style.Yellow("⊘")}, {free, ""}} {
+		line := tbl.Line(Row{Task: c.task}, time.Now())
+		if style.Width(line) != 90 {
+			t.Errorf("%s: line is %d wide", c.task.Name, style.Width(line))
+		}
+		if c.want != "" && !strings.Contains(line, c.want) || c.want == "" && strings.Contains(line, "⊘") {
+			t.Errorf("%s: line = %q, want icon %q", c.task.Name, line, c.want)
+		}
+	}
+	if NewTable([]*clickup.Task{free}, 90, false).Deps {
+		t.Error("dependency column without any dependencies")
+	}
+}
+
 func TestMarkdownSubset(t *testing.T) {
 	out := style.Strip(Markdown("# Title\n- item with `code`\n```\nraw\n```\n**bold**", 80))
 	want := "Title\n• item with  code \n" + " raw" + strings.Repeat(" ", 76) + "\nbold\n"
@@ -164,7 +187,7 @@ func TestDetailPropertiesAreCopyable(t *testing.T) {
 			{Name: "Estimate", Type: "number", Value: json.RawMessage(`3`)},
 			{Name: "Empty", Type: "short_text"},
 		}}
-	out := Detail(task, nil, time.Now(), 80)
+	out := Detail(task, nil, nil, time.Now(), 80)
 	for value, shown := range map[string]string{
 		"Fix login": style.Bold("Fix login"), "DEV-1": style.Dim("DEV-1"), "Backlog": style.Dim("Backlog"),
 		"alice": "alice",

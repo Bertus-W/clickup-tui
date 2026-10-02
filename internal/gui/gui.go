@@ -602,7 +602,7 @@ func (gui *Gui) renderDetail() {
 	}
 	v.Subtitle = t.Label()
 	width, _ := v.InnerSize()
-	write(v, strings.Split(render.Detail(t, gui.App.Comments, gui.App.Now(), width), "\n"))
+	write(v, strings.Split(render.Detail(t, gui.App.Comments, gui.App.Events(), gui.App.Now(), width), "\n"))
 	if gui.detailToEnd {
 		gui.detailToEnd = false
 		v.SetOriginY(max(v.ViewLinesHeight()-v.InnerHeight(), 0))
@@ -699,6 +699,10 @@ func (gui *Gui) focus(name string) {
 		gui.lastList = name
 		if gui.App != nil {
 			gui.App.SelectPinned(gui.App.PinnedSel)
+		}
+	case viewDetail:
+		if gui.App != nil {
+			gui.App.LoadActivity() // only now: it costs requests, scrolling past tasks shouldn't
 		}
 	}
 }

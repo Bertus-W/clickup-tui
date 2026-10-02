@@ -135,6 +135,8 @@ type App struct {
 	selIndex     int
 	pinnedAt     time.Time // when pinned tasks outside the list were last fetched
 	pinnedDue    bool      // fetch them once the list load in flight is done
+	activity     activity  // of the task activityID, see Events
+	activityID   string
 	seq          map[string]uint64
 	tasksKey     string                      // view the task list was loaded for
 	touch        map[string]uint64           // per task: bumped when an edit starts or ends
@@ -280,6 +282,7 @@ func (a *App) EnterWorkspace(teamID string) {
 	// Nothing from the previous workspace may linger: actions would reach its tasks.
 	a.TeamID = teamID
 	a.Tasks, a.Detail, a.Comments, a.SelectedID, a.Filter, a.tasksKey = nil, nil, nil, "", "", ""
+	a.activity, a.activityID = activity{}, ""
 	a.Sheet = Timesheet{}
 	a.setTimer(nil)
 	a.Hierarchy = cache.Value(a.Cache, "hier:"+teamID, []clickup.Space{})
@@ -673,6 +676,9 @@ func (a *App) Refresh() {
 	}
 	if a.Detail != nil && !a.Detail.Pending {
 		a.ReloadDetail(a.Detail)
+		if a.activityID == a.Detail.ID {
+			a.loadActivity(true)
+		}
 	}
 }
 

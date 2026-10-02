@@ -103,7 +103,7 @@ key in that list runs it.
 | `[2]` Lists | spaces, folders and lists |
 | `[3]` Tasks | the open list, or `Mine` (tasks assigned to you); switch with `[` `]`. Sorted under a heading per group: by status unless you pick otherwise (`S`) |
 | `[4]` Pinned | tasks you pinned, from any list; kept between starts |
-| `[0]` Task | the selected task: fields, description, subtasks, comments |
+| `[0]` Task | the selected task: fields, description, subtasks, comments and activity |
 | Command log | every API call with its status and latency (`@` toggles it) |
 
 ## Keys
@@ -208,6 +208,13 @@ Time tracking needs ClickUp's *Time Tracking* ClickApp enabled in the workspace.
 Click a page tab to switch pages, a panel to focus it and a row to select it; double-click a task to open it, or a timesheet
 cell to add time to it. Click the `List` / `Mine` tab to switch, scroll with the wheel, and click an
 option in a popup to pick it.
+
+Opening the task panel (`enter`, `0` or a click) also shows the task's activity between its
+comments, like ClickUp: who created it, the time people logged, when it moved to another status and
+when it was closed. ClickUp's API has no activity log, so this is pieced together from what it
+does offer. Status changes need ClickUp's *Time in Status* (paid plans), and don't say who made
+them; seeing everyone's logged time needs a workspace admin, otherwise you see your own. It isn't
+loaded for tasks you merely scroll past, to spare ClickUp's rate limit.
 
 In the task panel, click a property to copy it: the name, id, status, list, assignees, due date,
 tracked time or a custom field's value (it's underlined while the mouse is on it).

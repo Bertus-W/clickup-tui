@@ -297,6 +297,39 @@ func TestKeybindingsMenuRunsActions(t *testing.T) {
 	}
 }
 
+// Keys queued behind the one that closes a popup reach its bindings before the next layout
+// moves the focus (gocui keeps the deleted view focused); they used to dereference nil.
+func TestKeysAfterPopupClosesInSameBatch(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	picked := 0
+	h.event(func() {
+		h.gui.Menu("Test", []app.MenuItem{{Key: 'a', Label: "A"}}, 0, func(app.MenuItem) { picked++ })
+	})
+	if h.current() != viewPopup {
+		t.Fatalf("focus on %q, want the popup", h.current())
+	}
+	h.event(func() {
+		for _, key := range []viewKey{
+			{viewPopup, 'a'}, // the hotkey closes the menu; the rest arrive in the same batch
+			{viewPopup, 'a'}, {viewPopup, 'z'}, {viewPopup, 'j'}, {viewPopup, gocui.KeySpace},
+			{viewPopup, gocui.KeyEnter}, {viewPopup, gocui.KeyEsc}, {viewPopup, 'q'},
+			{viewPopup, gocui.KeyArrowDown}, {viewPopup, gocui.KeyTab}, {viewPopup, gocui.KeyCtrlS},
+			{viewPopupInput, gocui.KeyEnter}, {viewPopupInput, gocui.KeyEsc},
+			{viewPopupInput, gocui.KeyArrowUp}, {viewPopupInput, gocui.KeyTab},
+		} {
+			if err := h.keys[key](); err != nil {
+				t.Fatalf("%s on %s: %v", keyName(key.key), key.view, err)
+			}
+		}
+	})
+	if picked != 1 {
+		t.Errorf("menu action ran %d times, want 1", picked)
+	}
+	if h.gui.popup != nil || h.current() == viewPopup {
+		t.Errorf("popup still open, focus on %q", h.current())
+	}
+}
+
 func TestScreenModes(t *testing.T) {
 	h := newHarness(t, fake.Basic(5))
 	h.press('+', '+')
@@ -359,6 +392,41 @@ func TestDemoChipsAreColoured(t *testing.T) {
 	}
 	if style.Strip(chip) != " Critical " || !strings.Contains(chip, "48;2;229;0;0") {
 		t.Fatalf("severity chip = %q", chip)
+	}
+}
+
+func TestDependencyIconInListAndPinned(t *testing.T) {
+	h := newHarness(t, fake.Demo())
+	h.press(']', '/')
+	h.typeText("backlog")
+	h.press(enter, '3')
+	line := func(view, name string) string {
+		v, _ := h.gui.g.View(view)
+		for l := range strings.SplitSeq(v.Buffer(), "\n") {
+			if strings.Contains(l, name) {
+				return l
+			}
+		}
+		t.Fatalf("%s: no row %q in\n%s", view, name, v.Buffer())
+		return ""
+	}
+	if !strings.Contains(line(viewTasks, "Upgrade Postgres"), "⊘") || !strings.Contains(line(viewTasks, "p95 task search"), "⊘") {
+		t.Fatal("waiting and blocking tasks show no dependency icon")
+	}
+	if strings.Contains(line(viewTasks, "Dark mode contrast"), "⊘") {
+		t.Fatal("a task without dependencies shows the icon")
+	}
+	for i, r := range h.app.Rows() {
+		if r.Task.ID == "d5" {
+			for range i {
+				h.press('j')
+			}
+			break
+		}
+	}
+	h.press('P')
+	if !strings.Contains(line(viewPinned, "Upgrade Postgres"), "⊘") {
+		t.Fatal("pinned task shows no dependency icon")
 	}
 }
 
@@ -957,4 +1025,12 @@ func TestNoRefreshWhileUnfocused(t *testing.T) {
 	if lists() != n+1 {
 		t.Fatalf("%d refreshes, want 1", lists()-n)
 	}
+}
+
+// Opening the task panel shows the task's activity among its comments.
+func TestTaskPanelShowsActivity(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	h.wantScreen("Open the task panel (enter or 0) for its activity")
+	h.press(enter)
+	h.wantScreen("Comments (1) and activity", "tester created this task")
 }

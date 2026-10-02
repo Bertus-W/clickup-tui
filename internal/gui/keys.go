@@ -135,6 +135,18 @@ func (gui *Gui) register() error {
 	return set("", gocui.KeyCtrlC, func() error { return gocui.ErrQuit })
 }
 
+// whilePopup drops a popup key once the popup is gone. close deletes the popup views, but
+// gocui keeps the deleted view focused until the next layout, and keys queued in the same
+// batch (a menu hotkey and the next key, or key repeat) still reach the popup's bindings.
+func (gui *Gui) whilePopup(h func() error) func() error {
+	return func() error {
+		if gui.popup == nil {
+			return nil
+		}
+		return h()
+	}
+}
+
 // formSubmitKey is ctrl+s: create from anywhere in the new task form.
 func (gui *Gui) formSubmitKey() error {
 	if gui.popup == nil || gui.popup.kind != popupForm {
@@ -176,6 +188,11 @@ func (gui *Gui) fixedKeys() map[viewKey]func() error {
 	for r := rune('!'); r <= '~'; r++ {
 		if r != 'q' {
 			keys[viewKey{viewPopup, r}] = func() error { return gui.popupRune(r) }
+		}
+	}
+	for key, h := range keys {
+		if key.view == viewPopup || key.view == viewPopupInput {
+			keys[key] = gui.whilePopup(h)
 		}
 	}
 	return keys

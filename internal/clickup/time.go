@@ -2,9 +2,11 @@ package clickup
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,7 +24,8 @@ type TimeEntry struct {
 		ListID   FlexString `json:"list_id,omitzero"`
 		ListName string     `json:"list_name,omitzero"`
 	} `json:"task_location,omitzero"`
-	TaskURL string `json:"task_url,omitzero"`
+	TaskURL string     `json:"task_url,omitzero"`
+	At      FlexString `json:"at,omitzero"` // when it was logged (or last changed)
 }
 
 type EntryTask struct {
@@ -53,11 +56,19 @@ func (e TimeEntry) TaskID() string {
 
 func ms(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
 
-// TimeEntries lists my time entries between from and to; taskID narrows it to one task.
-func (c *Client) TimeEntries(ctx context.Context, teamID string, from, to time.Time, taskID string) ([]TimeEntry, error) {
+// TimeEntries lists time entries between from and to, of one task if taskID is set. They're my
+// own, unless assignees says whose (seeing others' needs a workspace admin or owner).
+func (c *Client) TimeEntries(ctx context.Context, teamID string, from, to time.Time, taskID string, assignees ...int64) ([]TimeEntry, error) {
 	q := url.Values{"start_date": {ms(from)}, "end_date": {ms(to)}, "include_location_names": {"true"}}
 	if taskID != "" {
 		q.Set("task_id", taskID)
+	}
+	if len(assignees) > 0 {
+		ids := make([]string, len(assignees))
+		for i, id := range assignees {
+			ids[i] = strconv.FormatInt(id, 10)
+		}
+		q.Set("assignee", strings.Join(ids, ","))
 	}
 	var out struct{ Data []TimeEntry }
 	err := c.do(ctx, http.MethodGet, "/team/"+teamID+"/time_entries", q, nil, &out)
@@ -108,4 +119,33 @@ func (c *Client) StopTimer(ctx context.Context, teamID string) (TimeEntry, error
 	var out struct{ Data TimeEntry }
 	err := c.do(ctx, http.MethodPost, "/team/"+teamID+"/time_entries/stop", nil, nil, &out)
 	return out.Data, err
+}
+
+// StatusTime is a status a task has been in: since when, and for how long in all.
+type StatusTime struct {
+	Status    string `json:"status"`
+	Color     string `json:"color"`
+	Type      string `json:"type"`
+	TotalTime struct {
+		ByMinute FlexFloat  `json:"by_minute"`
+		Since    FlexString `json:"since"`
+	} `json:"total_time"`
+}
+
+// TimeInStatus is a task's status history (ClickUp's Time in Status, on paid plans only).
+type TimeInStatus struct {
+	Current StatusTime   `json:"current_status"`
+	History []StatusTime `json:"status_history"`
+}
+
+func (c *Client) TimeInStatus(ctx context.Context, taskID string) (TimeInStatus, error) {
+	var out TimeInStatus
+	err := c.do(ctx, http.MethodGet, "/task/"+taskID+"/time_in_status", nil, nil, &out)
+	return out, err
+}
+
+// NotOnPlan reports whether err means the workspace's plan doesn't include the feature.
+func NotOnPlan(err error) bool {
+	e, ok := errors.AsType[*APIError](err)
+	return ok && e.Status == http.StatusForbidden && strings.Contains(strings.ToLower(e.Message), "plan")
 }

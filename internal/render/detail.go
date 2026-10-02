@@ -16,8 +16,9 @@ import (
 )
 
 // Detail renders the task panel: title, meta, custom fields, description, subtasks and comments.
-// width is the panel's inner width: code blocks are boxes that span it.
-func Detail(t *clickup.Task, comments []clickup.Comment, now time.Time, width int) string {
+// width is the panel's inner width: code blocks are boxes that span it. events is the task's
+// activity (see Activity), shown between the comments; nil when it isn't loaded.
+func Detail(t *clickup.Task, comments []clickup.Comment, events []Event, now time.Time, width int) string {
 	// Every property is Copyable: clicking it copies it (the underline shows on hover).
 	copyable := style.Copyable
 	var b strings.Builder
@@ -78,13 +79,36 @@ func Detail(t *clickup.Task, comments []clickup.Comment, now time.Time, width in
 	for _, c := range comments {
 		count += len(c.Replies)
 	}
-	b.WriteString(style.Bold("Comments ("+strconv.Itoa(count)+")") + "\n")
+	title := "Comments (" + strconv.Itoa(count) + ")"
+	if events != nil {
+		title = "Comments (" + strconv.Itoa(count) + ") and activity"
+	}
+	b.WriteString(style.Bold(title) + "\n")
+	if events == nil && !t.Pending {
+		b.WriteString(style.Dim("Open the task panel (enter or 0) for its activity: time logged, status changes.") + "\n")
+	}
+	// Comments and activity by date, like ClickUp: a run of events stays together.
+	i := 0
+	flush := func(before time.Time) {
+		first := true
+		for ; i < len(events) && (before.IsZero() || events[i].At.Before(before)); i++ {
+			if first {
+				b.WriteString("\n")
+				first = false
+			}
+			b.WriteString(eventLine(events[i]) + "\n")
+		}
+	}
 	for _, c := range byDate(comments) {
+		if at, ok := Millis(c.Date); ok {
+			flush(at)
+		}
 		b.WriteString("\n" + commentBlock(c, "", width))
 		for _, r := range byDate(c.Replies) { // a thread's replies, indented under it
 			b.WriteString(commentBlock(r, "  ↳ ", width))
 		}
 	}
+	flush(time.Time{})
 	return b.String()
 }
 

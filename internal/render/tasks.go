@@ -193,9 +193,24 @@ func PriorityFlag(t *clickup.Task, label bool) string {
 	return style.Fg(color, style.Plain)(text)
 }
 
+// DependencyFlag is one icon for a task in a dependency: red when it waits on another
+// task, yellow when it only blocks others.
+func DependencyFlag(t *clickup.Task) string {
+	switch {
+	case t.Status.Closed() && (t.WaitingOn() || t.Blocking()):
+		return style.Dim("⊘")
+	case t.WaitingOn():
+		return style.Red("⊘")
+	case t.Blocking():
+		return style.Yellow("⊘")
+	}
+	return ""
+}
+
 // Table is the column layout of the task panel for a given width.
 type Table struct {
 	Status, Name, Who, Due, List int
+	Deps                         bool // a column for DependencyFlag
 	Dropdowns                    []DropdownColumn
 }
 
@@ -206,6 +221,10 @@ func NewTable(tasks []*clickup.Task, width int, showList bool) Table {
 		t.Status = 2
 	}
 	fixed := t.Status + t.Who + t.Due + 1 + 4 // flag column, one space before each of name, who, due, flag
+	if slices.ContainsFunc(tasks, func(t *clickup.Task) bool { return len(t.Dependencies) > 0 }) {
+		t.Deps = true
+		fixed += 2
+	}
 	if showList && width >= 80 {
 		t.List = 14
 		fixed += t.List + 1
@@ -245,6 +264,10 @@ func (tbl Table) Line(row Row, now time.Time) string {
 	b.WriteString(DueCell(t, now).Fit(tbl.Due))
 	b.WriteString(" ")
 	b.WriteString(style.Raw(PriorityFlag(t, false), 1))
+	if tbl.Deps {
+		b.WriteString(" ")
+		b.WriteString(style.Raw(DependencyFlag(t), 1))
+	}
 	if tbl.List > 0 {
 		b.WriteString(" ")
 		b.WriteString(style.Cell{Text: t.List.Name, Style: style.Dim}.Fit(tbl.List))

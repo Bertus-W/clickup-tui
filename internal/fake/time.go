@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
@@ -36,9 +37,22 @@ func (s *Server) timeRoutes(handle func(string, func(http.ResponseWriter, *http.
 		q := r.URL.Query()
 		from, _ := strconv.ParseInt(q.Get("start_date"), 10, 64)
 		to, _ := strconv.ParseInt(q.Get("end_date"), 10, 64)
+		// Like ClickUp: my entries, unless assignee names whose; only admins may see others'.
+		whose := map[int64]bool{Me.ID: true}
+		if a := q.Get("assignee"); a != "" {
+			whose = map[int64]bool{}
+			for id := range strings.SplitSeq(a, ",") {
+				n, _ := strconv.ParseInt(id, 10, 64)
+				if n != Me.ID && s.NotAdmin {
+					return apiErr{401, "Only workspace admins can see others' time entries"}
+				}
+				whose[n] = true
+			}
+		}
 		out := []clickup.TimeEntry{}
 		for _, e := range s.Entries {
-			if start := e.Start.Int(); start >= from && start < to && (q.Get("task_id") == "" || e.TaskID() == q.Get("task_id")) {
+			if start := e.Start.Int(); start >= from && start < to && whose[e.User.ID] &&
+				(q.Get("task_id") == "" || e.TaskID() == q.Get("task_id")) {
 				out = append(out, e)
 			}
 		}

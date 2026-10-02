@@ -5,6 +5,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1019,7 +1020,7 @@ func TestTrackedTimeSurvivesRefreshAndEdits(t *testing.T) {
 	h.do(func(a *app.App) { a.OpenView(backlog) })
 	h.do(func(a *app.App) { a.Select(0) })
 	tracked := func() string {
-		return strings.Join(strings.Fields(style.Strip(render.Detail(h.app.Detail, nil, time.Now(), 80))), " ")
+		return strings.Join(strings.Fields(style.Strip(render.Detail(h.app.Detail, nil, nil, time.Now(), 80))), " ")
 	}
 	if !strings.Contains(tracked(), "tracked 1:30") {
 		t.Fatalf("task panel: %s", tracked())
@@ -1048,7 +1049,7 @@ func TestCommentThreadReplies(t *testing.T) {
 	if len(c) != 1 || len(c[0].Replies) != 1 || c[0].Replies[0].CommentText != "a reply in the thread" {
 		t.Fatalf("comments = %+v", c)
 	}
-	panel := style.Strip(render.Detail(h.app.Detail, h.app.Comments, time.Now(), 80))
+	panel := style.Strip(render.Detail(h.app.Detail, h.app.Comments, nil, time.Now(), 80))
 	for _, want := range []string{"Comments (2)", "first!", "↳ alice", "    a reply in the thread"} {
 		if !strings.Contains(panel, want) {
 			t.Errorf("task panel lacks %q:\n%s", want, panel)
@@ -1165,5 +1166,73 @@ func TestDescriptionWarnsBeforeEditing(t *testing.T) {
 	h.do((*app.App).EditDescription, true, "Edited") // yes, then a change: saved without asking again
 	if got := srv.Task("t1").MarkdownDescription; got != "Edited" {
 		t.Fatalf("description = %q", got)
+	}
+}
+
+// A task's activity (time logged, status changes, created/closed) loads when the task panel
+// opens, not while selecting tasks, and merges with the comments by date.
+func TestActivity(t *testing.T) {
+	srv := fake.Basic(3)
+	day := func(d int) time.Time { return time.Date(2026, 9, d, 10, 0, 0, 0, time.Local) }
+	srv.Tasks["t1"].DateCreated = clickup.FlexString(strconv.FormatInt(day(1).UnixMilli(), 10))
+	srv.Tasks["t1"].DateClosed = clickup.FlexString(strconv.FormatInt(day(20).UnixMilli(), 10))
+	srv.Comments["t1"] = []clickup.Comment{{ID: "c1", CommentText: "looks good", User: fake.Other,
+		Date: clickup.FlexString(strconv.FormatInt(day(12).UnixMilli(), 10))}}
+	srv.Entries = []clickup.TimeEntry{srv.Entry("t1", day(10), 90*time.Minute, "fixed it"), srv.Entry("t1", day(15), time.Hour, "")}
+	srv.Entries[1].User = fake.Other
+	var moved clickup.StatusTime
+	moved.Status, moved.Color = "in progress", "#1090e0"
+	moved.TotalTime.Since = clickup.FlexString(strconv.FormatInt(day(5).UnixMilli(), 10))
+	srv.History = map[string]clickup.TimeInStatus{"t1": {Current: moved, History: []clickup.StatusTime{moved}}}
+
+	h := newHarness(t, srv, nil).boot()
+	for i := range 3 {
+		h.do(func(a *app.App) { a.Select(i) })
+	}
+	h.do(func(a *app.App) { a.Select(0) })
+	if n := srv.Count("GET /api/v2/task/t1/time_in_status") + srv.Count("GET /api/v2/team/T1/time_entries"); n != 0 || h.app.Events() != nil {
+		t.Fatalf("activity loaded while selecting tasks (%d requests)", n)
+	}
+	h.do((*app.App).LoadActivity) // the task panel opened
+	panel := style.Strip(render.Detail(h.app.Detail, h.app.Comments, h.app.Events(), time.Now(), 100))
+	i := strings.Index(panel, "Comments (1) and activity")
+	if i < 0 {
+		t.Fatalf("no activity:\n%s", panel)
+	}
+	want := []string{"tester created this task", "moved to IN PROGRESS", "tester logged 1:30 — fixed it",
+		"alice", "looks good", "alice logged 1:00", "closed it"}
+	at := i
+	for _, w := range want {
+		j := strings.Index(panel[at:], w)
+		if j < 0 {
+			t.Fatalf("%q missing or out of order in:\n%s", w, panel[i:])
+		}
+		at += j
+	}
+	h.do((*app.App).LoadActivity) // open again within two minutes: nothing fetched
+	if n := srv.Count("GET /api/v2/task/t1/time_in_status"); n != 1 {
+		t.Errorf("fetched the status history %d times", n)
+	}
+}
+
+// Without Time in Status on the plan, or admin rights to see others' time, activity shows what
+// it can, and stops asking for what it can't have.
+func TestActivityOnASmallerPlan(t *testing.T) {
+	srv := fake.Basic(3)
+	srv.NoHistory, srv.NotAdmin = true, true
+	srv.Entries = []clickup.TimeEntry{srv.Entry("t1", time.Date(2026, 9, 10, 10, 0, 0, 0, time.Local), time.Hour, "")}
+	h := newHarness(t, srv, nil).boot()
+	h.do((*app.App).LoadActivity)
+	if ev := h.app.Events(); len(ev) != 2 || !strings.Contains(style.Strip(ev[1].What), "logged 1:00") {
+		t.Fatalf("events = %+v", ev)
+	}
+	entries := srv.Count("GET /api/v2/team/T1/time_entries")
+	h.do(func(a *app.App) { a.Select(1) })
+	h.do((*app.App).LoadActivity)
+	if srv.Count("GET /api/v2/task/t3/time_in_status") != 0 {
+		t.Error("asked for the status history again")
+	}
+	if n := srv.Count("GET /api/v2/team/T1/time_entries") - entries; n != 1 {
+		t.Errorf("%d time entry requests for the second task, want 1 (only mine, straight away)", n)
 	}
 }

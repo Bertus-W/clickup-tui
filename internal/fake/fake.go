@@ -43,8 +43,11 @@ type Server struct {
 	FailField   string              // task updates that set this field fail
 	Entries     []clickup.TimeEntry // time tracking
 	Running     *clickup.TimeEntry
-	Now         func() time.Time      // the server's clock for timers; tests pin it with the app's
-	Mentions    []clickup.CommentPart // the mentions of every comment posted
+	Now         func() time.Time                // the server's clock for timers; tests pin it with the app's
+	NotAdmin    bool                            // time entries of others are refused
+	NoHistory   bool                            // the plan lacks Time in Status
+	History     map[string]clickup.TimeInStatus // per task; else only its current status
+	Mentions    []clickup.CommentPart           // the mentions of every comment posted
 	nextEntry   int
 
 	mux *http.ServeMux
@@ -134,6 +137,12 @@ func (s *Server) add(t clickup.Task) {
 	}
 	if t.Assignees == nil {
 		t.Assignees = []clickup.User{}
+	}
+	if t.DateCreated == "" {
+		t.DateCreated = "1699990000000"
+	}
+	if t.Creator == nil {
+		t.Creator = &Me
 	}
 	s.Tasks[t.ID] = &t
 	s.order = append(s.order, t.ID)
@@ -269,6 +278,22 @@ func (s *Server) routes(mux *http.ServeMux) {
 		out := *t
 		out.MarkdownDescription = "" // like the real API, updates don't echo rendered markdown
 		return out
+	})
+	handle("GET "+p+"/task/{id}/time_in_status", func(_ http.ResponseWriter, r *http.Request) any {
+		t := s.lookup(r)
+		switch {
+		case t == nil:
+			return apiErr{404, "Task not found"}
+		case s.NoHistory:
+			return apiErr{403, "Time In Status is not available on your plan."}
+		}
+		if h, ok := s.History[t.ID]; ok {
+			return h
+		}
+		var cur clickup.StatusTime
+		cur.Status, cur.Color, cur.Type = t.Status.Status, t.Status.Color, t.Status.Type
+		cur.TotalTime.Since = t.DateCreated
+		return clickup.TimeInStatus{Current: cur, History: []clickup.StatusTime{cur}}
 	})
 	handle("GET "+p+"/task/{id}/comment", func(_ http.ResponseWriter, r *http.Request) any {
 		comments := []clickup.Comment{}

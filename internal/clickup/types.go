@@ -147,6 +147,10 @@ type Task struct {
 	OrderIndex          FlexFloat     `json:"orderindex"`
 	Parent              FlexString    `json:"parent,omitzero"`
 	DateUpdated         FlexString    `json:"date_updated,omitzero"`
+	DateCreated         FlexString    `json:"date_created,omitzero"`
+	DateDone            FlexString    `json:"date_done,omitzero"`
+	DateClosed          FlexString    `json:"date_closed,omitzero"`
+	Creator             *User         `json:"creator,omitzero"`
 	Description         string        `json:"description,omitzero"`
 	MarkdownDescription string        `json:"markdown_description,omitzero"`
 	URL                 string        `json:"url,omitzero"`
@@ -155,9 +159,27 @@ type Task struct {
 	CustomFields        []CustomField `json:"custom_fields,omitzero"`
 	TimeSpent           FlexString    `json:"time_spent,omitzero"` // ms tracked, when time tracking is on
 	Subtasks            []Task        `json:"subtasks,omitzero"`
+	Dependencies        []Dependency  `json:"dependencies,omitzero"`
 
 	// Pending marks an optimistic task that the server hasn't confirmed yet.
 	Pending bool `json:"-"`
+}
+
+// Dependency links two tasks: TaskID is waiting on DependsOn, which blocks it. A task lists
+// both directions, so it shows what it waits on and what it blocks.
+type Dependency struct {
+	TaskID    string `json:"task_id"`
+	DependsOn string `json:"depends_on"`
+}
+
+// WaitingOn reports whether another task blocks t.
+func (t *Task) WaitingOn() bool {
+	return slices.ContainsFunc(t.Dependencies, func(d Dependency) bool { return d.TaskID == t.ID })
+}
+
+// Blocking reports whether t blocks another task.
+func (t *Task) Blocking() bool {
+	return slices.ContainsFunc(t.Dependencies, func(d Dependency) bool { return d.DependsOn == t.ID })
 }
 
 // Label is the id users recognise: the custom id when the workspace has them.

@@ -111,6 +111,11 @@ func Demo() *Server {
 	}
 	s := New(tasks...)
 	s.Fields = fields
+	// The Postgres upgrade (d5) waits on the search index work (d3); both tasks list it.
+	dep := clickup.Dependency{TaskID: "d5", DependsOn: "d3"}
+	for _, id := range []string{dep.TaskID, dep.DependsOn} {
+		s.Tasks[id].Dependencies = []clickup.Dependency{dep}
+	}
 	// Some time logged this week, so the timesheet (T) has something to show.
 	monday := today.AddDate(0, 0, -((int(today.Weekday()) + 6) % 7))
 	day := func(d, hour int) time.Time {
