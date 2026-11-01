@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
+	"codeberg.org/b-wisman/clickup-tui/internal/parse"
 	"codeberg.org/b-wisman/clickup-tui/internal/style"
 )
 
@@ -207,11 +208,21 @@ func DependencyFlag(t *clickup.Task) string {
 	return ""
 }
 
-// Table is the column layout of the task panel for a given width.
+// EstimateText is the task's time estimate as hours ("3:30"), empty when it has none.
+func EstimateText(t *clickup.Task) string {
+	ms := t.TimeEstimate.Int()
+	if ms <= 0 {
+		return ""
+	}
+	return parse.Hours(time.Duration(ms) * time.Millisecond)
+}
+
+// Table is the column layout of the task panel for a given width. ID and Est are 0 when
+// those columns don't fit or, for Est, no task has an estimate.
 type Table struct {
-	Status, Name, Who, Due, List int
-	Deps                         bool // a column for DependencyFlag
-	Dropdowns                    []DropdownColumn
+	Status, ID, Name, Who, Due, List, Est int
+	Deps                                  bool // a column for DependencyFlag
+	Dropdowns                             []DropdownColumn
 }
 
 // NewTable fits columns into width; dropdown fields get columns while the name keeps ≥24 cols.
@@ -224,6 +235,22 @@ func NewTable(tasks []*clickup.Task, width int, showList bool) Table {
 	if slices.ContainsFunc(tasks, func(t *clickup.Task) bool { return len(t.Dependencies) > 0 }) {
 		t.Deps = true
 		fixed += 2
+	}
+	if width >= 60 { // the id people quote, as wide as the longest one
+		for _, task := range tasks {
+			t.ID = max(t.ID, min(12, style.Width(task.Label())))
+		}
+		if t.ID > 0 {
+			fixed += t.ID + 1
+		}
+	}
+	if width >= 80 {
+		for _, task := range tasks {
+			t.Est = max(t.Est, style.Width(EstimateText(task)))
+		}
+		if t.Est > 0 {
+			fixed += t.Est + 1
+		}
 	}
 	if showList && width >= 80 {
 		t.List = 14
@@ -252,6 +279,10 @@ func (tbl Table) Line(row Row, now time.Time) string {
 	}
 	b.WriteString(status.Fit(tbl.Status))
 	b.WriteString(" ")
+	if tbl.ID > 0 {
+		b.WriteString(style.Cell{Text: t.Label(), Style: style.Dim}.Fit(tbl.ID))
+		b.WriteString(" ")
+	}
 	b.WriteString(prefix.Fit(style.Width(prefix.Text)))
 	b.WriteString(name.Fit(nameWidth))
 	for _, col := range tbl.Dropdowns {
@@ -262,6 +293,10 @@ func (tbl Table) Line(row Row, now time.Time) string {
 	b.WriteString(style.Raw(AssigneesText(t), tbl.Who))
 	b.WriteString(" ")
 	b.WriteString(DueCell(t, now).Fit(tbl.Due))
+	if tbl.Est > 0 { // right-aligned, so the hours line up
+		est := EstimateText(t)
+		b.WriteString(" " + strings.Repeat(" ", tbl.Est-style.Width(est)) + style.Dim(est))
+	}
 	b.WriteString(" ")
 	b.WriteString(style.Raw(PriorityFlag(t, false), 1))
 	if tbl.Deps {

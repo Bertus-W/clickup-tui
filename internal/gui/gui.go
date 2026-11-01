@@ -20,7 +20,6 @@ import (
 	"github.com/jesseduffield/gocui"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/app"
-	"codeberg.org/b-wisman/clickup-tui/internal/cache"
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
 	"codeberg.org/b-wisman/clickup-tui/internal/render"
 	"codeberg.org/b-wisman/clickup-tui/internal/style"
@@ -139,6 +138,8 @@ func New(opts Options) (*Gui, error) {
 	if err := gui.register(); err != nil {
 		return nil, err
 	}
+	// The mouse is always on: click to focus, select and open, the wheel scrolls. The terminal
+	// still selects text with Option (iTerm2, Apple Terminal) or Shift held.
 	if err := gui.registerMouse(); err != nil {
 		return nil, err
 	}
@@ -152,19 +153,6 @@ func (gui *Gui) Async() app.Async { return gui.async }
 
 func (gui *Gui) Attach(a *app.App) {
 	gui.App = a
-	gui.g.Mouse = cache.Value(a.Cache, "ui:mouse", true)
-}
-
-// toggleMouse turns mouse support off, so the terminal selects and copies text again, and back
-// on. The choice is remembered.
-func (gui *Gui) toggleMouse() {
-	gui.g.Mouse = !gui.g.Mouse
-	_ = cache.Put(gui.App.Cache, "ui:mouse", gui.g.Mouse)
-	if gui.g.Mouse {
-		gui.Notify(app.Info, "Mouse on")
-	} else {
-		gui.Notify(app.Info, "Mouse off: drag to select text and copy it. M turns the mouse back on.")
-	}
 }
 
 // Run starts the event loop until the user quits.
@@ -368,7 +356,6 @@ func (gui *Gui) initView(v *gocui.View) {
 		v.TitlePrefix = "[0]"
 		v.Title = "Task"
 		v.Wrap = true
-		v.UnderlineHyperLinksOnlyOnHover = true // properties are clickable (they copy): show it on hover
 	case viewLog:
 		v.Title = "Command log"
 		v.Autoscroll = true
@@ -383,7 +370,7 @@ func (gui *Gui) initView(v *gocui.View) {
 	case viewSheetSide:
 		v.Wrap = true
 	case viewPopup:
-		v.Highlight = true // no wrapping: rows must match items for the cursor and clicks
+		v.Highlight = true // no wrapping: rows must match items for the cursor
 	case viewPopupInput:
 		v.Editable = true
 		v.Editor = gocui.EditorFunc(gui.editPopupInput)
@@ -733,19 +720,10 @@ func (gui *Gui) Refresh() {} // gocui redraws after every event and UI update
 func (gui *Gui) Clipboard(text string) error { return gui.clipboard(text) }
 func (gui *Gui) OpenURL(url string) error    { return gui.browser(url) }
 
-// openLink handles a click on a link in the task panel (see style.Link): a property copies its
-// value (style.Copyable), a link or image opens in the browser.
+// openLink opens a link or image clicked in the task panel (see style.Link) in the browser.
 func (gui *Gui) openLink(link, view string) error {
 	if gui.popup != nil || view != viewDetail {
 		return nil // clicks behind a popup don't count
-	}
-	if value, ok := style.Copied(link); ok {
-		if err := gui.clipboard(value); err != nil {
-			gui.Notify(app.Error, "Copy: "+err.Error())
-			return nil
-		}
-		gui.Notify(app.Info, "Copied: "+value)
-		return nil
 	}
 	if err := gui.browser(link); err != nil {
 		gui.Notify(app.Error, "Opening "+link+": "+err.Error())

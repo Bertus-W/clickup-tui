@@ -7,11 +7,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/mattn/go-runewidth"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
+	"codeberg.org/b-wisman/clickup-tui/internal/parse"
 	"codeberg.org/b-wisman/clickup-tui/internal/style"
 )
 
@@ -155,22 +157,115 @@ func FieldText(f *clickup.CustomField) string {
 	return string(f.Value)
 }
 
-// FieldsBlock lists every custom field and its value, sorted by name.
+// FieldRow is one row of the task panel's fields block: a name and its (styled) value. A value
+// may span lines; they line up under the first.
+type FieldRow struct{ Name, Value string }
+
+// StandardFields are ClickUp's own task fields that the panel's header doesn't show, in a
+// fixed order, each only when set.
+func StandardFields(t *clickup.Task) []FieldRow {
+	var rows []FieldRow
+	add := func(name, value string) {
+		if value != "" {
+			rows = append(rows, FieldRow{name, value})
+		}
+	}
+	day := func(ms clickup.FlexString) string {
+		if at, ok := Millis(ms); ok {
+			return at.Format(time.DateOnly)
+		}
+		return ""
+	}
+	names := func(users []clickup.User) string {
+		out := make([]string, len(users))
+		for i, u := range users {
+			out[i] = u.Username
+		}
+		return strings.Join(out, ", ")
+	}
+	add("Start date", day(t.StartDate))
+	if created := day(t.DateCreated); created != "" && t.Creator != nil && t.Creator.Username != "" {
+		add("Created", created+style.Dim(" by ")+t.Creator.Username)
+	} else {
+		add("Created", created)
+	}
+	add("Closed", day(cmp.Or(t.DateClosed, t.DateDone)))
+	add("Estimate", EstimateText(t))
+	if spent := t.TimeSpent.Int(); spent > 0 {
+		add("Tracked", parse.Hours(time.Duration(spent)*time.Millisecond))
+	}
+	if t.Points != 0 {
+		add("Points", strconv.FormatFloat(float64(t.Points), 'f', -1, 64))
+	}
+	add("Watchers", names(t.Watchers))
+	var groups []string
+	for _, g := range t.GroupAssignees {
+		groups = append(groups, g.Name)
+	}
+	add("Groups", strings.Join(groups, ", "))
+	add("Subtask of", string(t.Parent))
+	var lists []string
+	for _, l := range t.Locations {
+		lists = append(lists, l.Name)
+	}
+	add("Also in", strings.Join(lists, ", "))
+	if !t.Folder.Hidden {
+		add("Folder", t.Folder.Name)
+	}
+	var linked []string
+	for _, l := range t.LinkedTasks {
+		other := l.TaskID // a link lists both tasks: show the other one
+		if other == t.ID {
+			other = l.LinkID
+		}
+		linked = append(linked, other)
+	}
+	add("Linked", strings.Join(linked, ", "))
+	for _, c := range t.Checklists {
+		done := 0
+		lines := []string{""}
+		for _, it := range c.Items {
+			if it.Resolved {
+				done++
+				lines = append(lines, style.Green("[✓]")+" "+style.Dim(it.Name))
+			} else {
+				lines = append(lines, "[ ] "+it.Name)
+			}
+		}
+		lines[0] = style.Dim(fmt.Sprintf("%d/%d done", done, len(c.Items)))
+		add(cmp.Or(c.Name, "Checklist"), strings.Join(lines, "\n"))
+	}
+	var files []string
+	for _, a := range t.Attachments {
+		name := cmp.Or(a.Title, linkName(a.URL))
+		files = append(files, style.Link(a.URL, style.LinkText(name)))
+	}
+	add("Attachments", strings.Join(files, "\n"))
+	if t.Archived {
+		add("Archived", style.Yellow("yes"))
+	}
+	if t.Sharing.Public {
+		add("Public", "shared publicly")
+	}
+	return rows
+}
+
+// FieldsBlock lists the standard fields that are set, then every custom field (sorted by name)
+// with its value, names aligned. Empty when there's nothing to list.
 func FieldsBlock(t *clickup.Task) string {
-	fields := SortedFields(t.CustomFields)
+	rows := StandardFields(t)
+	for _, f := range SortedFields(t.CustomFields) {
+		rows = append(rows, FieldRow{f.Name, FieldText(f)})
+	}
 	width := 0
-	for _, f := range fields {
-		width = max(width, min(24, len(f.Name)))
+	for _, r := range rows {
+		width = max(width, min(24, style.Width(r.Name)))
 	}
 	var b strings.Builder
-	for _, f := range fields {
-		b.WriteString(style.Dim(style.Cell{Text: f.Name}.Fit(width)))
+	for _, r := range rows {
+		b.WriteString(style.Dim(style.Cell{Text: r.Name}.Fit(width)))
 		b.WriteString("  ")
-		shown := FieldText(f)
-		if value := strings.TrimSpace(style.Strip(shown)); f.IsSet() && value != "" {
-			shown = style.Copyable(value, shown) // click to copy
-		}
-		b.WriteString(shown)
+		b.WriteString(strings.ReplaceAll(r.Value, "\n", "\n"+strings.Repeat(" ", width+2)))
 		b.WriteString("\n")
 	}
 	return b.String()

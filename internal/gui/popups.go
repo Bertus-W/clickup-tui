@@ -2,6 +2,7 @@ package gui
 
 import (
 	"cmp"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -33,6 +34,8 @@ type popup struct {
 	keyLabels []string       // menu: key column text, when keys aren't plain runes
 	options   []app.Option   // picker, multi
 	visible   []int          // indexes into options after filtering
+	hidden    int            // matches left out of visible (maxMatches)
+	haystack  []string       // options' plain lowercase labels, for filtering
 	chosen    map[string]bool
 	query     string
 	typing    bool // multi: the filter input has focus
@@ -48,6 +51,7 @@ type popup struct {
 
 	onMenu    func(app.MenuItem)
 	onPick    func(string)
+	onQuery   func(string) // picker: what's typed, after every change (SearchPick)
 	onMulti   func(map[string]bool)
 	onPrompt  func(string)
 	onConfirm func()
@@ -82,15 +86,33 @@ func (gui *Gui) close() {
 	_ = gui.g.DeleteView(viewPopupInput)
 }
 
+// maxMatches caps the options a picker lists: a workspace's task index can hold tens of
+// thousands, and drawing them all on every keystroke is slow. Typing narrows them down.
+const maxMatches = 200
+
 func (p *popup) refilter(query string) {
 	p.query = query
-	p.visible = p.visible[:0]
-	q := strings.ToLower(query)
+	p.visible, p.hidden = p.visible[:0], 0
+	if len(p.haystack) != len(p.options) { // once per option list, not per keystroke
+		p.haystack = make([]string, len(p.options))
+		for i, o := range p.options {
+			p.haystack[i] = strings.ToLower(style.Strip(o.Label))
+		}
+	}
+	words := strings.Fields(strings.ToLower(query)) // every word, in any order: "safari login"
+	var always []int
 	for i, o := range p.options {
-		if strings.Contains(strings.ToLower(style.Strip(o.Label)), q) {
+		switch {
+		case o.Always:
+			always = append(always, i)
+		case slices.ContainsFunc(words, func(w string) bool { return !strings.Contains(p.haystack[i], w) }):
+		case p.kind == popupPicker && len(p.visible) >= maxMatches:
+			p.hidden++
+		default:
 			p.visible = append(p.visible, i)
 		}
 	}
+	p.visible = append(p.visible, always...)
 	p.sel = min(p.sel, max(len(p.visible)-1, 0))
 	if query != "" {
 		p.sel = 0
@@ -164,6 +186,26 @@ func (gui *Gui) Pick(title string, options []app.Option, current string, onPick 
 	p := &popup{kind: popupPicker, title: title, options: options, onPick: onPick}
 	p.sel = max(slices.IndexFunc(options, func(o app.Option) bool { return o.ID == current }), 0)
 	gui.open(p)
+}
+
+func (gui *Gui) SearchPick(title string, options []app.Option, onQuery func(string), onPick func(string)) {
+	gui.open(&popup{kind: popupPicker, title: title, options: options, onPick: onPick, onQuery: onQuery})
+}
+
+func (gui *Gui) UpdatePick(title, newTitle string, options []app.Option) {
+	p := gui.popup
+	if p == nil || p.kind != popupPicker || p.title != title {
+		return
+	}
+	sel := ""
+	if len(p.visible) > 0 && p.sel < len(p.visible) && !p.options[p.visible[p.sel]].Always {
+		sel = p.options[p.visible[p.sel]].ID // a task stays selected; "another task…" doesn't
+	}
+	p.title, p.options, p.haystack = newTitle, options, nil
+	p.refilter(p.query)
+	if i := slices.IndexFunc(p.visible, func(i int) bool { return options[i].ID == sel }); i >= 0 {
+		p.sel = i // the same option stays selected
+	}
 }
 
 func (gui *Gui) MultiPick(title string, options []app.Option, selected map[string]bool, onDone func(map[string]bool)) {
@@ -367,6 +409,9 @@ func listHint(p *popup) string {
 	if p.kind == popupForm && p.form.ListHint != "" {
 		return p.form.ListHint
 	}
+	if p.kind == popupPicker && p.hidden > 0 {
+		return fmt.Sprintf("%d more · type to narrow · ↑↓: move · enter: select", p.hidden)
+	}
 	return map[popupKind]string{
 		popupMenu:    "enter: select · esc: cancel",
 		popupPicker:  "↑↓: move · enter: select · esc: cancel",
@@ -568,7 +613,12 @@ func (gui *Gui) editPopupInput(v *gocui.View, key gocui.Key, ch rune, mod gocui.
 	switch p := gui.popup; {
 	case p == nil:
 	case p.options != nil:
-		p.refilter(v.TextArea.GetContent())
+		query := v.TextArea.GetContent()
+		changed := query != p.query
+		p.refilter(query)
+		if p.onQuery != nil && changed {
+			p.onQuery(query)
+		}
 	case p.form != nil:
 		p.form.Name = v.TextArea.GetContent() // rows may depend on it, e.g. a calculated end time
 	}

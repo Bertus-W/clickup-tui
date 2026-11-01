@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"codeberg.org/b-wisman/clickup-tui/internal/clickup"
-	"codeberg.org/b-wisman/clickup-tui/internal/parse"
 	"codeberg.org/b-wisman/clickup-tui/internal/style"
 )
 
@@ -19,47 +18,40 @@ import (
 // width is the panel's inner width: code blocks are boxes that span it. events is the task's
 // activity (see Activity), shown between the comments; nil when it isn't loaded.
 func Detail(t *clickup.Task, comments []clickup.Comment, events []Event, now time.Time, width int) string {
-	// Every property is Copyable: clicking it copies it (the underline shows on hover).
-	copyable := style.Copyable
 	var b strings.Builder
-	b.WriteString("\n" + copyable(t.Name, style.Bold(t.Name)) + "\n\n")
+	b.WriteString("\n" + style.Bold(t.Name) + "\n\n")
 
 	status := StatusCell(t)
-	b.WriteString(copyable(t.Status.Status, status.Fit(style.Width(status.Text))))
+	b.WriteString(status.Fit(style.Width(status.Text)))
 	if t.Priority != nil {
-		b.WriteString("   " + copyable(t.Priority.Priority, PriorityFlag(t, true)))
+		b.WriteString("   " + PriorityFlag(t, true))
 	}
 	if due := DueCell(t, now); due.Text != "" {
-		day, _ := Millis(t.DueDate)
-		b.WriteString("   due " + copyable(day.Format(time.DateOnly), due.Fit(len(due.Text))))
+		b.WriteString("   due " + due.Fit(len(due.Text)))
 	}
 	b.WriteString("\n")
 	people := make([]string, len(t.Assignees))
 	for i, a := range t.Assignees {
-		people[i] = copyable(a.Username, a.Username)
+		people[i] = a.Username
 	}
 	// No emoji here: terminals disagree on their width, which breaks panel borders.
 	b.WriteString(style.Dim("assigned ") + cmp.Or(strings.Join(people, ", "), style.Dim("nobody")))
 	for _, tag := range t.Tags {
-		b.WriteString(" " + copyable(tag.Name, style.Chip("#"+tag.Name, tag.TagBg)))
+		b.WriteString(" " + style.Chip("#"+tag.Name, tag.TagBg))
 	}
 	b.WriteString("\n")
-	meta := []string{copyable(t.Label(), style.Dim(t.Label()))}
+	meta := []string{style.Dim(t.Label())}
 	if t.List.Name != "" {
-		meta = append(meta, copyable(t.List.Name, style.Dim(t.List.Name)))
+		meta = append(meta, style.Dim(t.List.Name))
 	}
 	if updated, ok := Millis(t.DateUpdated); ok {
 		when := updated.Format("2006-01-02 15:04")
-		meta = append(meta, style.Dim("updated ")+copyable(when, style.Dim(when)))
-	}
-	if spent := t.TimeSpent.Int(); spent > 0 {
-		hours := parse.Hours(time.Duration(spent) * time.Millisecond)
-		meta = append(meta, style.Dim("tracked ")+copyable(hours, style.Dim(hours)))
+		meta = append(meta, style.Dim("updated "+when))
 	}
 	b.WriteString(strings.Join(meta, style.Dim("  ·  ")) + "\n\n")
 
-	if len(t.CustomFields) > 0 {
-		b.WriteString(FieldsBlock(t) + "\n")
+	if fields := FieldsBlock(t); fields != "" {
+		b.WriteString(fields + "\n")
 	}
 	b.WriteString(Markdown(cmp.Or(strings.TrimSpace(t.Body()), "*No description*"), width))
 
@@ -150,7 +142,8 @@ var (
 	numbered  = regexp.MustCompile(`^(\s*)(\d+)[.)]\s+(.*)$`)
 	quote     = regexp.MustCompile(`^\s*>\s?(.*)$`)
 	rule      = regexp.MustCompile(`^\s*([-*_])(\s*[-*_]){2,}\s*$`)
-	inlineTok = regexp.MustCompile("`(?P<code>[^`]+)`" +
+	inlineTok = regexp.MustCompile(`\\(?P<esc>[!-/:-@\[-` + "`" + `{-~])` + // a backslash escape: ClickUp writes snake\_case
+		"|`(?P<code>[^`]+)`" +
 		`|!\[(?P<alt>[^\]]*)\]\((?P<img>[^)\s]+)\)` + // an image, often without a name
 		`|\[(?P<text>[^\]]*)\]\((?P<href>[^)\s]+)\)` +
 		`|(?P<url>https?://[^\s)>\]]+)` +
@@ -217,12 +210,14 @@ func block(line string) string {
 }
 
 // inline styles the spans of one line. Styles don't nest, so each span gets one style. Links
-// and images become clickable labels (style.Link) instead of showing their URL.
+// and images become labels that are links (style.Link) instead of showing their URL.
 func inline(line string) string {
 	return inlineTok.ReplaceAllStringFunc(line, func(tok string) string {
 		m := inlineTok.FindStringSubmatch(tok)
 		g := func(name string) string { return m[inlineTok.SubexpIndex(name)] }
 		switch {
+		case g("esc") != "":
+			return g("esc")
 		case g("code") != "":
 			return style.Code(" " + g("code") + " ")
 		case g("img") != "":

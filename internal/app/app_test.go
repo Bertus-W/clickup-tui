@@ -63,7 +63,13 @@ type scriptUI struct {
 	form        *app.Form
 	clipboard   string
 	editorText  string // what the editor last opened with
+	searching   *typed // a search picker waiting for the options its query brings
+	searchPick  func(string)
 }
+
+// typed answers a search picker: it types query, then picks the option matching pick once
+// the options the query brings arrive (UpdatePick).
+type typed struct{ query, pick string }
 
 func (s *scriptUI) next(title string) any {
 	s.titles = append(s.titles, title)
@@ -101,6 +107,29 @@ func (s *scriptUI) Pick(title string, options []app.Option, _ string, onPick fun
 			s.t.Fatalf("picker %q has no option %q", title, want)
 		}
 		onPick(options[i].ID)
+	}
+}
+
+func (s *scriptUI) SearchPick(title string, options []app.Option, onQuery func(string), onPick func(string)) {
+	answer := s.next(title)
+	if ty, ok := answer.(typed); ok {
+		s.searching, s.searchPick = &ty, onPick
+		onQuery(ty.query)
+		return
+	}
+	s.answers = append([]any{answer}, s.answers...) // a plain answer: pick from what's listed
+	s.titles = s.titles[:len(s.titles)-1]
+	s.Pick(title, options, "", onPick)
+}
+
+func (s *scriptUI) UpdatePick(_, _ string, options []app.Option) {
+	if s.searching == nil {
+		return
+	}
+	want := s.searching.pick
+	if i := slices.IndexFunc(options, func(o app.Option) bool { return matches(o, want) }); i >= 0 {
+		s.searching = nil
+		s.searchPick(options[i].ID)
 	}
 }
 
@@ -366,9 +395,50 @@ func TestCreateSubtaskCommentDelete(t *testing.T) {
 
 func TestGoToCustomIDOutsideView(t *testing.T) {
 	h := newHarness(t, fake.Basic(5), nil).boot()
-	h.do((*app.App).GoTo, "https://app.clickup.com/t/T1/DEV-2")
+	h.do((*app.App).GoTo, app.ByRef, "https://app.clickup.com/t/T1/DEV-2")
 	if h.app.Detail.ID != "t2" || h.ui.focus != app.PanelDetail {
 		t.Fatalf("detail = %v, focus = %v", h.app.Detail.ID, h.ui.focus)
+	}
+}
+
+// Go to task finds a task by part of its name once the app has seen it, even after leaving
+// its list; names never cost a request.
+func TestGoToFindsSeenTasksByName(t *testing.T) {
+	srv := fake.Basic(5)
+	srv.Tasks["t4"].List = clickup.Ref{ID: "L2", Name: "Inbox"}
+	srv.Tasks["t4"].Name = "Fix the Safari login loop"
+	h := newHarness(t, srv, nil).boot()
+	h.do(func(a *app.App) { a.OpenView(app.View{Kind: "list", ID: "L2", Name: "Inbox"}) }) // seen here
+	h.do(func(a *app.App) { a.OpenView(app.View{Kind: "list", ID: fake.ListID, Name: "Backlog"}) })
+	before := len(srv.Requests)
+	h.do((*app.App).GoTo, "Safari login") // listed from the local copies, no lookup
+	if h.app.Detail == nil || h.app.Detail.ID != "t4" || h.ui.focus != app.PanelDetail {
+		t.Fatalf("detail = %v, focus = %v", h.app.Detail, h.ui.focus)
+	}
+	for _, r := range srv.Requests[before:] {
+		if strings.Contains(r, "/team/") {
+			t.Errorf("searching listed the workspace: %s", r)
+		}
+	}
+}
+
+// Typing a custom id, or just its number, looks up a task the app hasn't seen; after that a
+// name search finds it.
+func TestGoToLooksUpTypedIDs(t *testing.T) {
+	srv := fake.Basic(5)
+	srv.Tasks["t4"].List = clickup.Ref{ID: "L2", Name: "Inbox"} // never opened
+	srv.Tasks["t4"].Name = "Fix the Safari login loop"
+	h := newHarness(t, srv, nil).boot()
+	h.do((*app.App).GoTo, typed{"dev-4", "Safari"})
+	if h.app.Detail == nil || h.app.Detail.ID != "t4" {
+		t.Fatalf("custom id: detail = %v", h.app.Detail)
+	}
+	h.do((*app.App).GoTo, "Safari") // remembered: listed straight away
+	srv.Tasks["t2"].List = clickup.Ref{ID: "L2", Name: "Inbox"}
+	h.do(func(a *app.App) { a.OpenView(app.View{Kind: "list", ID: fake.ListID, Name: "Backlog"}) })
+	h.do((*app.App).GoTo, typed{"2", "DEV-2"}) // DEV- is a known prefix: 2 → DEV-2
+	if h.app.Detail.ID != "t2" {
+		t.Fatalf("number: detail = %v", h.app.Detail.ID)
 	}
 }
 
@@ -836,7 +906,7 @@ func TestWorkspaceSwitchResetsState(t *testing.T) {
 
 func TestGoToEmptyReference(t *testing.T) {
 	h := newHarness(t, fake.Basic(5), nil).boot()
-	h.do((*app.App).GoTo, "https://app.clickup.com/t/")
+	h.do((*app.App).GoTo, app.ByRef, "https://app.clickup.com/t/")
 	if !strings.Contains(h.ui.notes[len(h.ui.notes)-1], "doesn't point at a task") || h.app.Detail.ID != "t1" {
 		t.Fatalf("notes = %v, detail %s", h.ui.notes, h.app.Detail.ID)
 	}
@@ -1022,12 +1092,12 @@ func TestTrackedTimeSurvivesRefreshAndEdits(t *testing.T) {
 	tracked := func() string {
 		return strings.Join(strings.Fields(style.Strip(render.Detail(h.app.Detail, nil, nil, time.Now(), 80))), " ")
 	}
-	if !strings.Contains(tracked(), "tracked 1:30") {
+	if !strings.Contains(tracked(), "Tracked 1:30") {
 		t.Fatalf("task panel: %s", tracked())
 	}
 	srv.Tasks["t2"].Name = "Changed elsewhere" // so the refresh brings new list data
 	h.do(func(a *app.App) { a.LoadTasks(true) })
-	if !strings.Contains(tracked(), "tracked 1:30") {
+	if !strings.Contains(tracked(), "Tracked 1:30") {
 		t.Fatalf("after a list refresh: %s", tracked())
 	}
 	h.do((*app.App).TogglePin)

@@ -157,12 +157,63 @@ type Task struct {
 	List                Ref           `json:"list"`               // the home list
 	Locations           []Ref         `json:"locations,omitzero"` // other lists it's also in
 	CustomFields        []CustomField `json:"custom_fields,omitzero"`
-	TimeSpent           FlexString    `json:"time_spent,omitzero"` // ms tracked, when time tracking is on
+	TimeSpent           FlexString    `json:"time_spent,omitzero"`    // ms tracked, when time tracking is on
+	TimeEstimate        FlexString    `json:"time_estimate,omitzero"` // ms estimated, when estimates are on
 	Subtasks            []Task        `json:"subtasks,omitzero"`
 	Dependencies        []Dependency  `json:"dependencies,omitzero"`
 
+	// Standard fields shown when set (render.StandardFields).
+	StartDate      FlexString   `json:"start_date,omitzero"`
+	Points         FlexFloat    `json:"points,omitzero"`
+	Archived       bool         `json:"archived,omitzero"`
+	Watchers       []User       `json:"watchers,omitzero"`
+	GroupAssignees []Group      `json:"group_assignees,omitzero"`
+	Folder         FolderRef    `json:"folder,omitzero"`
+	Checklists     []Checklist  `json:"checklists,omitzero"`
+	LinkedTasks    []LinkedTask `json:"linked_tasks,omitzero"`
+	Attachments    []Attachment `json:"attachments,omitzero"` // only on a task fetched on its own
+	Sharing        Sharing      `json:"sharing,omitzero"`
+
 	// Pending marks an optimistic task that the server hasn't confirmed yet.
 	Pending bool `json:"-"`
+}
+
+// Group is a user group (team) assigned to a task.
+type Group struct {
+	ID   FlexString `json:"id"`
+	Name string     `json:"name"`
+}
+
+// FolderRef is the folder of a task's list; lists outside folders have a hidden one.
+type FolderRef struct {
+	ID     FlexString `json:"id,omitzero"`
+	Name   string     `json:"name,omitzero"`
+	Hidden bool       `json:"hidden,omitzero"`
+}
+
+type Checklist struct {
+	Name  string          `json:"name"`
+	Items []ChecklistItem `json:"items,omitzero"`
+}
+
+type ChecklistItem struct {
+	Name     string `json:"name"`
+	Resolved bool   `json:"resolved,omitzero"`
+}
+
+// LinkedTask is a plain link between two tasks (not a dependency).
+type LinkedTask struct {
+	TaskID string `json:"task_id"`
+	LinkID string `json:"link_id"`
+}
+
+type Attachment struct {
+	Title string `json:"title,omitzero"`
+	URL   string `json:"url,omitzero"`
+}
+
+type Sharing struct {
+	Public bool `json:"public,omitzero"`
 }
 
 // Dependency links two tasks: TaskID is waiting on DependsOn, which blocks it. A task lists

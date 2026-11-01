@@ -119,7 +119,7 @@ func TestMarkdownBlocksAndSpans(t *testing.T) {
 	}
 }
 
-// Images (ClickUp writes pasted ones as ![](url)) and links become clickable labels, named after
+// Images (ClickUp writes pasted ones as ![](url)) and links become labels that link, named after
 // the file when they have no text.
 func TestMarkdownImagesAndLinks(t *testing.T) {
 	img := "https://t9012.p.clickup-attachments.com/t9012/f5f0/image%20one.png?view=open"
@@ -179,30 +179,67 @@ func TestCodeBlocks(t *testing.T) {
 	}
 }
 
-// Every property in the task panel copies its value when clicked; empty fields don't.
-func TestDetailPropertiesAreCopyable(t *testing.T) {
-	task := &clickup.Task{ID: "t1", CustomID: "DEV-1", Name: "Fix login", List: clickup.Ref{Name: "Backlog"},
-		Status: clickup.Status{Status: "in progress"}, Assignees: []clickup.User{{Username: "alice"}},
-		CustomFields: []clickup.CustomField{
-			{Name: "Estimate", Type: "number", Value: json.RawMessage(`3`)},
-			{Name: "Empty", Type: "short_text"},
-		}}
-	out := Detail(task, nil, nil, time.Now(), 80)
-	for value, shown := range map[string]string{
-		"Fix login": style.Bold("Fix login"), "DEV-1": style.Dim("DEV-1"), "Backlog": style.Dim("Backlog"),
-		"alice": "alice",
+func TestMarkdownBackslashEscapes(t *testing.T) {
+	// ClickUp's markdown_description escapes punctuation: the backslashes aren't text.
+	for md, want := range map[string]string{
+		`snake\_case and \*stars\*`: "snake_case and *stars*",
+		`\# not a heading`:          "# not a heading",
+		`\[x\] and a \\ backslash`:  `[x] and a \ backslash`,
+		"`code\\_stays` but a\\_b":  " code\\_stays  but a_b",
+		`C:\Users stays as written`: `C:\Users stays as written`,
 	} {
-		if !strings.Contains(out, style.Copyable(value, shown)) {
-			t.Errorf("%q isn't copyable", value)
+		if got := strings.TrimSpace(style.Strip(Markdown(md, 80))); got != strings.TrimSpace(want) {
+			t.Errorf("Markdown(%q) = %q, want %q", md, got, want)
 		}
 	}
-	if !strings.Contains(out, "cu-copy:in%20progress") || !strings.Contains(out, "cu-copy:3") {
-		t.Error("the status or the field value isn't copyable")
+}
+
+func TestTableShowsIDAndEstimate(t *testing.T) {
+	tasks := []*clickup.Task{
+		{ID: "abc", CustomID: "DEV-12", Name: "With estimate", TimeEstimate: "5400000"},
+		{ID: "def", Name: "Without"},
 	}
-	if strings.Contains(out, "cu-copy:%E2%80%94") { // "—", an empty field
-		t.Error("an empty field is copyable")
+	tbl := NewTable(tasks, 100, false)
+	first := style.Strip(tbl.Line(Row{Task: tasks[0]}, time.Now()))
+	second := style.Strip(tbl.Line(Row{Task: tasks[1]}, time.Now()))
+	if !strings.Contains(first, "DEV-12") || !strings.Contains(first, "1:30") {
+		t.Errorf("row lacks id or estimate: %q", first)
 	}
-	if v, ok := style.Copied("cu-copy:in%20progress"); !ok || v != "in progress" {
-		t.Errorf("Copied = %q, %v", v, ok)
+	if !strings.Contains(second, "def") || style.Width(first) != style.Width(second) {
+		t.Errorf("rows don't line up:\n%q\n%q", first, second)
+	}
+	if narrow := NewTable(tasks, 50, false); narrow.ID != 0 || narrow.Est != 0 {
+		t.Errorf("narrow table keeps id/estimate columns: %+v", narrow)
+	}
+	detail := style.Strip(Detail(tasks[0], nil, nil, time.Now(), 80))
+	if !strings.Contains(detail, "Estimate  1:30") {
+		t.Errorf("detail lacks the estimate:\n%s", detail)
+	}
+}
+
+// Standard fields show only when set, lined up with the custom fields.
+func TestStandardFields(t *testing.T) {
+	task := &clickup.Task{ID: "t1", Name: "Fix", DateCreated: "1700000000000", Creator: &clickup.User{Username: "alice"},
+		StartDate: "1700000000000", Points: 3, Watchers: []clickup.User{{Username: "bob"}, {Username: "carol"}},
+		Parent: "t0", Folder: clickup.FolderRef{Name: "hidden", Hidden: true},
+		LinkedTasks:  []clickup.LinkedTask{{TaskID: "t1", LinkID: "t9"}},
+		Checklists:   []clickup.Checklist{{Name: "Release", Items: []clickup.ChecklistItem{{Name: "tag", Resolved: true}, {Name: "notes"}}}},
+		Attachments:  []clickup.Attachment{{Title: "log.txt", URL: "https://x.test/log.txt"}},
+		CustomFields: []clickup.CustomField{{Name: "Severity", Type: "short_text", Value: json.RawMessage(`"high"`)}},
+	}
+	out := style.Strip(FieldsBlock(task))
+	for _, want := range []string{
+		"Start date   2023-11-14", "Created      2023-11-14 by alice", "Points       3", "Watchers     bob, carol",
+		"Subtask of   t0", "Linked       t9", "Release      1/2 done\n             [✓] tag\n             [ ] notes",
+		"Attachments  log.txt", "Severity     high",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("fields lack %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"Folder", "Estimate", "Tracked", "Archived", "Closed", "Groups"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("an empty field shows: %q\n%s", unwanted, out)
+		}
 	}
 }

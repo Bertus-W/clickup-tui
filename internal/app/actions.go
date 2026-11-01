@@ -3,7 +3,6 @@ package app
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -584,17 +583,11 @@ func (a *App) postComment(t *clickup.Task, text string) {
 	})
 }
 
-// GoTo jumps to a task by id, custom id or URL, even outside the current view.
+// GoTo jumps to any task in the workspace, found by part of its name or id (see pickTask),
+// or by id or URL.
 func (a *App) GoTo() {
-	check := func(ref string) error {
-		if parse.TaskRef(ref) == "" {
-			return errors.New("that URL doesn't point at a task")
-		}
-		return nil
-	}
-	a.UI.Prompt(Prompt{Title: "Go to task", Placeholder: "task id, custom id (ABC-123) or URL", Check: check}, func(ref string) {
-		id := parse.TaskRef(ref)
-		if i := slices.IndexFunc(a.Tasks, func(t *clickup.Task) bool { return t.ID == id || t.CustomID == id }); i >= 0 {
+	a.pickTask("Go to task", a.shownTasks(), func(r render.SheetTask) {
+		if i := slices.IndexFunc(a.Tasks, func(t *clickup.Task) bool { return t.ID == r.ID }); i >= 0 {
 			if !render.Matches(a.Tasks[i], a.Filter) {
 				a.SetFilter("")
 			}
@@ -602,11 +595,16 @@ func (a *App) GoTo() {
 			a.UI.Focus(PanelTasks)
 			return
 		}
+		if t, _, ok := cache.Get[clickup.Task](a.Cache, "task:"+r.ID); ok {
+			a.LoadDetail(&t) // shows the cached copy and refreshes it
+			a.UI.Focus(PanelDetail)
+			return
+		}
 		a.run("goto", func(ctx context.Context, apply func(func())) {
-			t, err := a.API.GetTask(ctx, id, a.TeamID)
+			t, err := a.API.GetTask(ctx, r.ID, a.TeamID)
 			apply(func() {
 				if err != nil {
-					a.error("Task "+id, err)
+					a.error("Task "+r.Label, err)
 					return
 				}
 				_ = cache.Put(a.Cache, "task:"+t.ID, t)
@@ -617,33 +615,137 @@ func (a *App) GoTo() {
 	})
 }
 
+// CopyMenu offers every part of the task for the clipboard: ids, name, links, description,
+// properties, custom fields and the comments. Parts the task doesn't have are left out.
 func (a *App) CopyMenu() {
 	t := a.current()
 	if t == nil {
 		return
 	}
-	items := []MenuItem{{'u', "Task URL", t.URL}, {'i', "Task ID", t.ID}}
+	items := []MenuItem{{'i', "ID", t.Label()}}
 	if t.CustomID != "" {
-		items = append(items, MenuItem{'c', "Custom ID", t.CustomID})
+		items = append(items, MenuItem{'I', "Internal ID", t.ID})
 	}
 	items = append(items,
-		MenuItem{'n', "Task name", t.Name},
+		MenuItem{'u', "URL", t.URL},
+		MenuItem{'n', "Name", t.Name},
 		MenuItem{'m', "Markdown link", fmt.Sprintf("[%s](%s)", t.Name, t.URL)})
 	if body := strings.TrimSpace(t.Body()); body != "" {
 		items = append(items, MenuItem{'d', "Description (markdown)", body})
 	}
-	a.UI.Menu("Copy to clipboard", items, 0, func(item MenuItem) {
-		text := item.Value.(string)
-		if err := a.UI.Clipboard(text); err != nil {
-			a.error("Copy", err)
-			return
+	if a.Comments != nil && a.Detail == t {
+		if text := commentsText(a.Comments); text != "" {
+			items = append(items, MenuItem{'c', "Comments", text})
 		}
-		shown, _, multiline := strings.Cut(text, "\n")
-		if r := []rune(shown); len(r) > 60 || multiline {
-			shown = string(r[:min(len(r), 60)]) + "…"
+	}
+	add := func(key rune, label, value string) {
+		if value != "" {
+			items = append(items, MenuItem{key, label, value})
 		}
-		a.UI.Notify(Info, "Copied: "+shown)
-	})
+	}
+	add('s', "Status", t.Status.Status)
+	add('l', "List", t.List.Name)
+	var people, tags []string
+	for _, u := range t.Assignees {
+		people = append(people, u.Username)
+	}
+	for _, tag := range t.Tags {
+		tags = append(tags, tag.Name)
+	}
+	add('a', "Assignees", strings.Join(people, ", "))
+	add('g', "Tags", strings.Join(tags, ", "))
+	if t.Priority != nil {
+		add('p', "Priority", t.Priority.Priority)
+	}
+	if due, ok := render.Millis(t.DueDate); ok {
+		add('t', "Due date", due.Format(time.DateOnly))
+	}
+	add('e', "Estimate", render.EstimateText(t))
+	if spent := t.TimeSpent.Int(); spent > 0 {
+		add('h', "Tracked time", parse.Hours(time.Duration(spent)*time.Millisecond))
+	}
+	if start, ok := render.Millis(t.StartDate); ok {
+		add('b', "Start date", start.Format(time.DateOnly))
+	}
+	if t.Points != 0 {
+		add('o', "Points", strconv.FormatFloat(float64(t.Points), 'f', -1, 64))
+	}
+	var watchers, checklists, files []string
+	for _, u := range t.Watchers {
+		watchers = append(watchers, u.Username)
+	}
+	for _, c := range t.Checklists { // as markdown checklists
+		checklists = append(checklists, "**"+c.Name+"**")
+		for _, it := range c.Items {
+			checklists = append(checklists, map[bool]string{true: "- [x] ", false: "- [ ] "}[it.Resolved]+it.Name)
+		}
+	}
+	for _, f := range t.Attachments {
+		files = append(files, f.URL)
+	}
+	add('w', "Watchers", strings.Join(watchers, ", "))
+	add('r', "Checklists (markdown)", strings.Join(checklists, "\n"))
+	add('f', "Attachment URLs", strings.Join(files, "\n"))
+	// Custom fields get the digits and leftover letters, so the keys above never move.
+	var fields []*clickup.CustomField
+	var names []string
+	for _, f := range render.SortedFields(t.CustomFields) {
+		if f.IsSet() && strings.TrimSpace(style.Strip(render.FieldText(f))) != "" {
+			fields, names = append(fields, f), append(names, f.Name)
+		}
+	}
+	var reserved strings.Builder
+	for _, it := range items {
+		reserved.WriteRune(it.Key)
+	}
+	reserved.WriteString("iumndcslagptehbowrf" + "jk") // the fixed keys, even when absent; j/k move in menus
+	for i, key := range render.Hotkeys(names, reserved.String()) {
+		items = append(items, MenuItem{key, fields[i].Name, strings.TrimSpace(style.Strip(render.FieldText(fields[i])))})
+	}
+	a.UI.Menu("Copy to clipboard", items, 0, func(item MenuItem) { a.copy(item.Value.(string)) })
+}
+
+// CopyID copies the id people quote (the custom id when the workspace has them) in one key.
+func (a *App) CopyID() {
+	if t := a.current(); t != nil {
+		a.copy(t.Label())
+	}
+}
+
+func (a *App) copy(text string) {
+	if err := a.UI.Clipboard(text); err != nil {
+		a.error("Copy", err)
+		return
+	}
+	shown, _, multiline := strings.Cut(text, "\n")
+	if r := []rune(shown); len(r) > 60 || multiline {
+		shown = string(r[:min(len(r), 60)]) + "…"
+	}
+	a.UI.Notify(Info, "Copied: "+shown)
+}
+
+// commentsText is the comments and their replies as plain text, oldest first.
+func commentsText(comments []clickup.Comment) string {
+	var b strings.Builder
+	write := func(c clickup.Comment, indent string) {
+		when := ""
+		if at, ok := render.Millis(c.Date); ok {
+			when = " (" + at.Format("2006-01-02 15:04") + ")"
+		}
+		b.WriteString(indent + c.User.Username + when + ":\n")
+		for line := range strings.Lines(strings.TrimSpace(c.Text())) {
+			b.WriteString(indent + strings.TrimRight(line, "\n") + "\n")
+		}
+		b.WriteString("\n")
+	}
+	sorted := slices.SortedStableFunc(slices.Values(comments), func(x, y clickup.Comment) int { return cmp.Compare(x.Date.Int(), y.Date.Int()) })
+	for _, c := range sorted {
+		write(c, "")
+		for _, r := range c.Replies {
+			write(r, "    ")
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (a *App) OpenInBrowser() {

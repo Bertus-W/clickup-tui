@@ -90,6 +90,9 @@ func Demo() *Server {
 			t.MarkdownDescription += "\n\n```go\nif seen[event.ID] {\n\treturn nil // already charged\n}\n```\n\n" +
 				"![](https://codeberg.org/b-wisman/clickup-tui/raw/branch/main/docs/screenshot.png)"
 		}
+		if i%3 == 0 { // some tasks have a time estimate, in ms like the API
+			t.TimeEstimate = clickup.FlexString(strconv.Itoa((i%4 + 1) * 90 * 60 * 1000))
+		}
 		if d.Priority > 0 {
 			name := []string{"", "urgent", "high", "normal", "low"}[d.Priority]
 			t.Priority = &clickup.Priority{ID: clickup.FlexString(strconv.Itoa(d.Priority)), Priority: name}

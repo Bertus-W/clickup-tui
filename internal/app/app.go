@@ -63,8 +63,9 @@ type MenuItem struct {
 }
 
 type Option struct {
-	ID    string
-	Label string // may contain ANSI styling; filtering uses the plain text
+	ID     string
+	Label  string // may contain ANSI styling; filtering uses the plain text
+	Always bool   // stays listed whatever the filter
 }
 
 type Prompt struct {
@@ -82,6 +83,11 @@ type Prompt struct {
 type UI interface {
 	Menu(title string, items []MenuItem, highlighted int, onPick func(MenuItem))
 	Pick(title string, options []Option, current string, onPick func(id string))
+	// SearchPick is Pick with a hook: onQuery gets what's typed after every change.
+	SearchPick(title string, options []Option, onQuery func(query string), onPick func(id string))
+	// UpdatePick replaces the options of the open picker titled title, if it's still open,
+	// keeping what's typed; newTitle becomes its title.
+	UpdatePick(title, newTitle string, options []Option)
 	MultiPick(title string, options []Option, selected map[string]bool, onDone func(map[string]bool))
 	Prompt(p Prompt, onSubmit func(string))
 	Confirm(title, message string, onYes func())
@@ -138,6 +144,8 @@ type App struct {
 	activity     activity  // of the task activityID, see Events
 	activityID   string
 	seq          map[string]uint64
+	seen         map[string]seenTask // local copies of tasks, for the task pickers (search.go)
+	seenTeam     string
 	tasksKey     string                      // view the task list was loaded for
 	touch        map[string]uint64           // per task: bumped when an edit starts or ends
 	deleting     map[clickup.FlexString]bool // time entries being deleted
@@ -447,6 +455,7 @@ func (a *App) keepLocal(tasks []*clickup.Task, sameView bool, touched map[string
 
 func (a *App) setTasks(tasks []*clickup.Task) {
 	a.Tasks = tasks
+	a.rememberTasks(tasks...)
 	if a.Detail != nil && !slices.Contains(a.Pinned, a.Detail) { // a pinned task stays shown as is
 		if fresh := a.find(a.Detail.ID); fresh != nil && fresh != a.Detail {
 			keepDetails(fresh, a.Detail)
@@ -636,6 +645,7 @@ func (a *App) loadDetail(t *clickup.Task, force bool) {
 				target = a.live(t) // a list reload may have replaced the object meanwhile
 			}
 			changed := fresh.DateUpdated != target.DateUpdated
+			a.rememberTasks(&fresh)
 			if a.touch[id] == touched { // an edit since the fetch started is newer than this data
 				replace(target, fresh)
 				a.propagate(target)

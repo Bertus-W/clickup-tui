@@ -166,14 +166,21 @@ func replace(dst *clickup.Task, src clickup.Task) {
 	keepDetails(dst, &old)
 }
 
-// keepDetails fills in what only a task fetched on its own carries, the tracked time and the
-// subtasks, from an older copy when the newer data came from a list, which leaves them out.
+// keepDetails fills in what only a task fetched on its own carries (the tracked time, subtasks,
+// attachments and checklists) from an older copy when the newer data came from a list, which
+// leaves them out.
 func keepDetails(dst, older *clickup.Task) {
 	if dst.TimeSpent == "" {
 		dst.TimeSpent = older.TimeSpent
 	}
 	if dst.Subtasks == nil {
 		dst.Subtasks = older.Subtasks
+	}
+	if dst.Attachments == nil {
+		dst.Attachments = older.Attachments
+	}
+	if dst.Checklists == nil {
+		dst.Checklists = older.Checklists
 	}
 }
 

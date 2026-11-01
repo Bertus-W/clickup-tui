@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -387,7 +388,7 @@ func TestDemoChipsAreColoured(t *testing.T) {
 	var chip string
 	for _, r := range h.app.Rows() {
 		if r.Task.Name == "Login redirect loop on Safari 18" {
-			chip = render.DropdownCell(r.Task, render.NewTable(h.app.Tasks, 90, false).Dropdowns[1])
+			chip = render.DropdownCell(r.Task, render.NewTable(h.app.Tasks, 120, false).Dropdowns[1])
 		}
 	}
 	if style.Strip(chip) != " Critical " || !strings.Contains(chip, "48;2;229;0;0") {
@@ -444,72 +445,6 @@ func TestSelectionBarFollowsFocus(t *testing.T) {
 	h.press('3', 's')
 	if !inactive(viewTasks) {
 		t.Fatal("with a popup open the panel behind it is inactive")
-	}
-}
-
-func (h *harness) click(view string, y int, double bool) {
-	h.t.Helper()
-	h.mouse(view, gocui.MouseLeft, y, double)
-}
-
-func (h *harness) mouse(view string, key gocui.Key, y int, double bool) {
-	h.t.Helper()
-	handler, ok := h.gui.mouseMap()[viewKey{view, key}]
-	if !ok {
-		h.t.Fatalf("no mouse binding for %v on %q", key, view)
-	}
-	h.event(func() {
-		if !h.gui.g.ShouldHandleMouseEvent(must(h.gui.g.View(view)), key) {
-			return
-		}
-		if err := handler(gocui.ViewMouseBindingOpts{Y: y, Key: key, IsDoubleClick: double}); err != nil {
-			h.t.Fatal(err)
-		}
-	})
-}
-
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
-
-func TestMouse(t *testing.T) {
-	h := newHarness(t, fake.Basic(5))
-	h.click(viewTasks, 3, false) // line 0 is the status heading
-	if h.app.SelectedID != "t5" || h.current() != viewTasks {
-		t.Fatalf("click row 3: selected %q, focus %q", h.app.SelectedID, h.current())
-	}
-	h.click(viewTasks, 0, false)
-	if h.app.SelectedID != "t5" {
-		t.Fatalf("a click on the heading selected %q", h.app.SelectedID)
-	}
-	h.mouse(viewTasks, gocui.MouseWheelUp, 0, false)
-	if h.app.SelectedID != "t3" {
-		t.Fatalf("wheel up: selected %q", h.app.SelectedID)
-	}
-	h.click(viewTasks, 2, true)
-	if h.current() != viewDetail {
-		t.Fatalf("double-click should open the task panel, focus %q", h.current())
-	}
-
-	h.click(viewLists, 1, false) // a branch opens on a single click
-	h.wantScreen("▼ Engineering")
-	if h.current() != viewLists {
-		t.Fatalf("focus %q", h.current())
-	}
-
-	// Popups take clicks; the panels behind them don't.
-	h.click(viewTasks, 1, false)
-	h.press('s')
-	h.click(viewTasks, 3, false)
-	if h.gui.popup == nil || h.app.SelectedID != "t1" {
-		t.Fatal("a click outside the popup went through")
-	}
-	h.click(viewPopup, 1, false) // IN PROGRESS
-	if got := h.fake.Task("t1").Status.Status; got != "in progress" || h.gui.popup != nil {
-		t.Fatalf("clicked option: status %q", got)
 	}
 }
 
@@ -742,18 +677,6 @@ func TestPageTabs(t *testing.T) {
 	}
 }
 
-// Clicks on a panel's or popup's title border have Y = -1; they must not crash.
-func TestClicksOnBordersDontCrash(t *testing.T) {
-	h := newHarness(t, fake.Basic(5))
-	h.click(viewLists, -1, false)
-	h.click(viewTasks, -1, false)
-	h.press('s')
-	h.click(viewPopup, -1, false)
-	if h.gui.popup == nil {
-		t.Fatal("a click on the popup border shouldn't pick anything")
-	}
-}
-
 // Deleting the only entry of the last timesheet row keeps a valid selection.
 func TestTimesheetDeleteLastRowEntry(t *testing.T) {
 	srv := fake.Basic(5)
@@ -782,19 +705,6 @@ func TestCursorHiddenAfterInput(t *testing.T) {
 	h.press('g', esc)
 	if h.gui.g.Cursor {
 		t.Fatal("cursor still visible after a prompt closed")
-	}
-}
-
-// Clicking a property of the create form edits it; it doesn't create the task.
-func TestFormClickEditsRow(t *testing.T) {
-	h := newHarness(t, fake.Basic(5))
-	h.event(func() { h.app.OpenView(app.View{Kind: "list", ID: fake.ListID, Name: "Backlog"}) })
-	h.press('n')
-	h.typeText("Clicked")
-	h.click(viewPopup, 2, false) // Priority
-	h.wantScreen("Priority", "⚑ urgent")
-	if len(h.fake.Tasks) != 5 {
-		t.Fatal("clicking a row created the task")
 	}
 }
 
@@ -940,7 +850,8 @@ func TestTimesheetAddRowByID(t *testing.T) {
 	h := newHarness(t, fake.Basic(5))
 	h.press('H', 'n')
 	h.wantScreen("Add a task row", "+ another task by id or URL")
-	h.press(enter) // the first option
+	h.typeText("no such task") // only the last option stays
+	h.press(enter)
 	h.wantScreen("task id, custom id (ABC-123) or URL")
 	h.typeText("DEV-4")
 	if got := h.gui.inputText(); got != "DEV-4" {
@@ -953,57 +864,20 @@ func TestTimesheetAddRowByID(t *testing.T) {
 	}
 }
 
-// A link or image clicked in the task panel opens in the browser; behind a popup it doesn't.
-func TestClickedLinkOpens(t *testing.T) {
+// y offers every part of the task; Y copies the id straight away.
+func TestCopyMenuAndCopyID(t *testing.T) {
 	h := newHarness(t, fake.Basic(5))
-	var opened []string
-	h.gui.browser = func(url string) error { opened = append(opened, url); return nil }
-	h.event(func() { _ = h.gui.openLink("https://example.com/image.png", viewDetail) })
-	if len(opened) != 1 || opened[0] != "https://example.com/image.png" {
-		t.Fatalf("opened %v", opened)
-	}
-	h.wantScreen("Opened in your browser: https://example.com/image.png")
-	h.press('?') // a popup is open now
-	h.event(func() { _ = h.gui.openLink("https://example.com/other", viewDetail) })
-	if len(opened) != 1 {
-		t.Fatalf("a click behind the popup opened %v", opened)
-	}
-}
-
-// M turns the mouse off so the terminal selects text again, says so in the tab bar, and
-// remembers it.
-func TestMouseToggle(t *testing.T) {
-	h := newHarness(t, fake.Basic(5))
-	if !h.gui.g.Mouse {
-		t.Fatal("the mouse starts on")
-	}
-	h.press('M')
-	if h.gui.g.Mouse {
-		t.Fatal("M should turn the mouse off")
-	}
-	h.wantScreen("mouse off · M", "Mouse off: drag to select text")
-	if cache.Value(h.app.Cache, "ui:mouse", true) {
-		t.Error("the choice isn't remembered")
-	}
-	h.press('H', 'M') // the timesheet too
-	if !h.gui.g.Mouse || strings.Contains(h.screen(), "mouse off") {
-		t.Fatal("M should turn the mouse back on")
-	}
-}
-
-// Clicking a property in the task panel copies it; a real link still opens.
-func TestClickedPropertyCopies(t *testing.T) {
-	h := newHarness(t, fake.Basic(5))
-	var copied, opened []string
+	var copied []string
 	h.gui.clipboard = func(s string) error { copied = append(copied, s); return nil }
-	h.gui.browser = func(s string) error { opened = append(opened, s); return nil }
-	h.event(func() { _ = h.gui.openLink("cu-copy:DEV-1", viewDetail) })
-	h.wantScreen("Copied: DEV-1")
-	h.event(func() { _ = h.gui.openLink("https://example.com", viewDetail) })
-	if len(copied) != 1 || copied[0] != "DEV-1" || len(opened) != 1 {
-		t.Fatalf("copied %v, opened %v", copied, opened)
+	h.press(enter) // open the first task, so its comments load
+	h.press('Y')
+	h.press('y')
+	h.wantScreen("Copy to clipboard", "Markdown link", "Status", "Comments", "Estimate")
+	h.press('s')
+	h.press('y', 'c')
+	if len(copied) != 3 || copied[0] != "DEV-1" || copied[1] == "" || !strings.Contains(copied[2], ":") {
+		t.Fatalf("copied = %q", copied)
 	}
-	h.wantScreen("Opened in your browser: https://example.com")
 }
 
 // No periodic refresh while the terminal window isn't focused; coming back refreshes once.
@@ -1033,4 +907,180 @@ func TestTaskPanelShowsActivity(t *testing.T) {
 	h.wantScreen("Open the task panel (enter or 0) for its activity")
 	h.press(enter)
 	h.wantScreen("Comments (1) and activity", "tester created this task")
+}
+
+// A picker matches every typed word in any order; an Always option stays listed.
+func TestPickerMatchesEveryWord(t *testing.T) {
+	p := &popup{kind: popupPicker, options: []app.Option{
+		{ID: "a", Label: "DEV-1 Login redirect loop on Safari"},
+		{ID: "b", Label: "DEV-2 Safari icons"},
+		{ID: app.ByRef, Label: "+ another task by id or URL…", Always: true},
+	}}
+	ids := func() (out []string) {
+		for _, i := range p.visible {
+			out = append(out, p.options[i].ID)
+		}
+		return out
+	}
+	p.refilter("safari login")
+	if got := ids(); !slices.Equal(got, []string{"a", app.ByRef}) {
+		t.Fatalf("safari login: %v", got)
+	}
+	p.refilter("dev-2")
+	if got := ids(); !slices.Equal(got, []string{"b", app.ByRef}) {
+		t.Fatalf("dev-2: %v", got)
+	}
+}
+
+func (h *harness) click(view string, y int, double bool) {
+	h.t.Helper()
+	h.mouse(view, gocui.MouseLeft, y, double)
+}
+
+func (h *harness) mouse(view string, key gocui.Key, y int, double bool) {
+	h.t.Helper()
+	handler, ok := h.gui.mouseMap()[viewKey{view, key}]
+	if !ok {
+		h.t.Fatalf("no mouse binding for %v on %q", key, view)
+	}
+	h.event(func() {
+		if !h.gui.g.ShouldHandleMouseEvent(must(h.gui.g.View(view)), key) {
+			return
+		}
+		if err := handler(gocui.ViewMouseBindingOpts{Y: y, Key: key, IsDoubleClick: double}); err != nil {
+			h.t.Fatal(err)
+		}
+	})
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func TestMouse(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	h.click(viewTasks, 3, false) // line 0 is the status heading
+	if h.app.SelectedID != "t5" || h.current() != viewTasks {
+		t.Fatalf("click row 3: selected %q, focus %q", h.app.SelectedID, h.current())
+	}
+	h.click(viewTasks, 0, false)
+	if h.app.SelectedID != "t5" {
+		t.Fatalf("a click on the heading selected %q", h.app.SelectedID)
+	}
+	h.mouse(viewTasks, gocui.MouseWheelUp, 0, false)
+	if h.app.SelectedID != "t3" {
+		t.Fatalf("wheel up: selected %q", h.app.SelectedID)
+	}
+	h.click(viewTasks, 2, true)
+	if h.current() != viewDetail {
+		t.Fatalf("double-click should open the task panel, focus %q", h.current())
+	}
+
+	h.click(viewLists, 1, false) // a branch opens on a single click
+	h.wantScreen("▼ Engineering")
+	if h.current() != viewLists {
+		t.Fatalf("focus %q", h.current())
+	}
+
+	// Popups take clicks; the panels behind them don't.
+	h.click(viewTasks, 1, false)
+	h.press('s')
+	h.click(viewTasks, 3, false)
+	if h.gui.popup == nil || h.app.SelectedID != "t1" {
+		t.Fatal("a click outside the popup went through")
+	}
+	h.click(viewPopup, 1, false) // IN PROGRESS
+	if got := h.fake.Task("t1").Status.Status; got != "in progress" || h.gui.popup != nil {
+		t.Fatalf("clicked option: status %q", got)
+	}
+}
+
+// Clicks on a panel's or popup's title border have Y = -1; they must not crash.
+func TestClicksOnBordersDontCrash(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	h.click(viewLists, -1, false)
+	h.click(viewTasks, -1, false)
+	h.press('s')
+	h.click(viewPopup, -1, false)
+	if h.gui.popup == nil {
+		t.Fatal("a click on the popup border shouldn't pick anything")
+	}
+}
+
+// Clicking a property of the create form edits it; it doesn't create the task.
+func TestFormClickEditsRow(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	h.event(func() { h.app.OpenView(app.View{Kind: "list", ID: fake.ListID, Name: "Backlog"}) })
+	h.press('n')
+	h.typeText("Clicked")
+	h.click(viewPopup, 2, false) // Priority
+	h.wantScreen("Priority", "⚑ urgent")
+	if len(h.fake.Tasks) != 5 {
+		t.Fatal("clicking a row created the task")
+	}
+}
+
+// A link or image clicked in the task panel opens in the browser; behind a popup it doesn't.
+func TestClickedLinkOpens(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	var opened []string
+	h.gui.browser = func(url string) error { opened = append(opened, url); return nil }
+	h.event(func() { _ = h.gui.openLink("https://example.com/image.png", viewDetail) })
+	if len(opened) != 1 || opened[0] != "https://example.com/image.png" {
+		t.Fatalf("opened %v", opened)
+	}
+	h.wantScreen("Opened in your browser: https://example.com/image.png")
+	h.press('?') // a popup is open now
+	h.event(func() { _ = h.gui.openLink("https://example.com/other", viewDetail) })
+	if len(opened) != 1 {
+		t.Fatalf("a click behind the popup opened %v", opened)
+	}
+}
+
+// The mouse is always on, and no key turns it off (M used to, by accident too: the harness
+// fails on an unbound key, so M is checked by its absence from the bindings).
+func TestMouseStaysOn(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	if !h.gui.g.Mouse {
+		t.Fatal("the mouse should be on")
+	}
+	if strings.Contains(h.screen(), "mouse off") {
+		t.Fatal("the tab bar mentions the mouse")
+	}
+}
+
+// Typing a custom id in the go-to picker looks up a task no list on screen has.
+func TestGoToPickerLooksUpTypedID(t *testing.T) {
+	srv := fake.Basic(5)
+	srv.Tasks["t4"].List = clickup.Ref{ID: "L2", Name: "Inbox"}
+	srv.Tasks["t4"].Name = "Fix the Safari login loop"
+	h := newHarness(t, srv)
+	h.press('g')
+	h.typeText("DEV-4")
+	h.wantScreen("Fix the Safari login loop")
+	h.press(enter)
+	if h.app.Detail == nil || h.app.Detail.ID != "t4" {
+		t.Fatalf("detail = %v", h.app.Detail)
+	}
+}
+
+// A picker lists at most maxMatches options, says how many more there are, and keeps an
+// Always option listed.
+func TestPickerCapsMatches(t *testing.T) {
+	p := &popup{kind: popupPicker}
+	for i := range 250 {
+		p.options = append(p.options, app.Option{ID: fmt.Sprint(i), Label: fmt.Sprintf("task %d", i)})
+	}
+	p.options = append(p.options, app.Option{ID: app.ByRef, Label: "+ another task", Always: true})
+	p.refilter("")
+	if len(p.visible) != maxMatches+1 || p.hidden != 50 || !strings.HasPrefix(listHint(p), "50 more") {
+		t.Fatalf("visible %d, hidden %d, hint %q", len(p.visible), p.hidden, listHint(p))
+	}
+	p.refilter("task 24") // each word on its own: 24, 124, 224, 240…249, plus the Always one
+	if len(p.visible) != 14 || p.hidden != 0 {
+		t.Fatalf("narrowed: visible %d, hidden %d", len(p.visible), p.hidden)
+	}
 }

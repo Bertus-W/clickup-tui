@@ -89,6 +89,7 @@ func (a *App) LoadWeek() {
 				return
 			}
 			a.Sheet.Entries = a.keepPendingEntries(entries)
+			a.rememberEntries(entries)
 			a.clampSheet()
 		})
 	})
@@ -227,57 +228,21 @@ func (a *App) ClearCell() {
 	})
 }
 
-// AddSheetTask adds a task row to the sheet. It offers pinned tasks, the open list, my
-// tasks and last week's rows; any other task can be added by id or URL.
+// AddSheetTask adds a task row to the sheet. It searches the whole workspace (see pickTask);
+// what's on screen and last week's rows come first.
 func (a *App) AddSheetTask() {
-	const byRef = "\x00ref"
-	seen := map[string]bool{}
-	options := []Option{{ID: byRef, Label: style.Green("+ another task by id or URL…")}}
-	rows := map[string]render.SheetTask{}
-	add := func(r render.SheetTask) {
-		if r.ID == "" || seen[r.ID] {
-			return
-		}
-		seen[r.ID], rows[r.ID] = true, r
-		options = append(options, Option{ID: r.ID, Label: style.Dim(r.Label) + " " + r.Name + style.Dim("  "+r.List)})
-	}
-	mine := cache.Value[[]*clickup.Task](a.Cache, fmt.Sprintf("tasks:%s:my::false", a.TeamID), nil)
-	for _, t := range slices.Concat(a.Pinned, []*clickup.Task{a.Detail}, a.Tasks, mine) {
-		if t != nil && !t.Pending {
-			add(sheetTask(t))
-		}
-	}
+	first := a.shownTasks()
 	lastWeek := a.Sheet.Week.AddDate(0, 0, -7)
 	prev, _, _ := render.Sheet(cache.Value[[]clickup.TimeEntry](a.Cache, a.weekKey(lastWeek), nil), lastWeek,
 		cache.Value[[]render.SheetTask](a.Cache, a.extraKey(lastWeek), nil), a.Now())
 	for _, r := range prev {
-		add(render.SheetTask{ID: r.TaskID, Label: r.Label, Name: r.Name, List: r.List})
+		first = append(first, render.SheetTask{ID: r.TaskID, Label: r.Label, Name: r.Name, List: r.List})
 	}
-	a.UI.Pick("Add a task row · type to search", options, "", func(id string) {
-		if id != byRef {
-			a.addSheetRow(rows[id])
-			return
+	week := a.Sheet.Week
+	a.pickTask("Add a task row", first, func(t render.SheetTask) {
+		if a.Sheet.Week.Equal(week) {
+			a.addSheetRow(t)
 		}
-		check := func(ref string) error {
-			if parse.TaskRef(ref) == "" {
-				return errors.New("that URL doesn't point at a task")
-			}
-			return nil
-		}
-		a.UI.Prompt(Prompt{Title: "Add a task row", Placeholder: "task id, custom id (ABC-123) or URL", Check: check}, func(ref string) {
-			id, teamID, week := parse.TaskRef(ref), a.TeamID, a.Sheet.Week
-			a.run("", func(ctx context.Context, apply func(func())) {
-				t, err := a.API.GetTask(ctx, id, teamID)
-				apply(func() {
-					switch {
-					case err != nil:
-						a.error("Task "+id, err)
-					case a.Sheet.Week.Equal(week):
-						a.addSheetRow(sheetTask(&t))
-					}
-				})
-			})
-		})
 	})
 }
 
@@ -792,4 +757,15 @@ func (a *App) TimerLine() string {
 		name = cmp.Or(a.Timer.Task.CustomID, string(a.Timer.Task.ID)) + " " + a.Timer.Task.Name
 	}
 	return style.Green("⏱ "+clock) + " " + name
+}
+
+// rememberEntries keeps local copies of the tasks time was logged on, for the task pickers.
+func (a *App) rememberEntries(entries []clickup.TimeEntry) {
+	var tasks []render.SheetTask
+	for _, e := range entries {
+		if e.Task != nil && e.Task.ID != "" {
+			tasks = append(tasks, render.SheetTask{ID: string(e.Task.ID), Label: cmp.Or(e.Task.CustomID, string(e.Task.ID)), Name: e.Task.Name})
+		}
+	}
+	a.remember(tasks...)
 }

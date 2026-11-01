@@ -118,10 +118,9 @@ key in that list runs it.
 | `J` `K` · `ctrl+d` `ctrl+u` | scroll the task panel from anywhere |
 | `?` · `x` | keybindings of the focused panel (pressing a key in the list runs it) |
 | `ctrl+p` | jump to any list (type to filter) |
-| `g` | go to a task by id, custom id (`DEV-123`) or URL |
+| `g` | go to a task: type part of its name or id (tasks the app has seen), or an id or URL |
 | `+` `_` | screen mode: normal → half → full |
 | `@` | toggle the command log |
-| `M` | mouse on / off: off lets the terminal select text, to copy it |
 | `R` · `q` | refresh · quit |
 
 **Tasks, Pinned and the task panel**
@@ -142,13 +141,17 @@ key in that list runs it.
 | `L` | log time (see [Logging time](#logging-time)) |
 | `T` · `w` | start or stop a timer · the task's time entries (pick one to edit or delete it, `+` logs more) |
 | `P` | pin / unpin |
-| `d` · `o` · `y` | delete (asks first) · open in the browser · copy the URL, id, name, a markdown link or the description |
+| `d` · `o` · `y` · `Y` | delete (asks first) · open in the browser · copy a part of the task: id, URL, name, markdown link, description, comments, status, list, assignees, tags, priority, due date, estimate, tracked time, start date, points, watchers, checklists, attachment URLs or a custom field · copy the id |
 | `/` · `v` · `S` | filter by name, id, status, assignee, tag or dropdown value · show closed tasks · sort by status, assignee, priority or due date (Tasks) |
 
 **Lists:** `enter` opens a list, `space` expands or collapses, `/` searches all lists.
 **Workspace:** `enter` switches workspace.
 
+The task list shows each task's id and, when tasks have one, its time estimate in hours.
 Dropdown custom fields show as coloured chip columns in the task list when there's room.
+The task panel lists ClickUp's standard fields that are set (start date, created and closed,
+estimate, tracked time, points, watchers, groups, parent, other lists, folder, linked tasks,
+checklists, attachments, archived, public) above the custom fields.
 
 A prompt that can't read what you typed (a date, a number, a time) stays open and says why on its
 border, so you can fix the typo instead of typing it all again.
@@ -191,8 +194,16 @@ side shows the entries behind the selected cell.
 | `[` `]` · `w` | previous / next week · this week |
 | `esc` | back to the tasks |
 
-`n` offers your pinned tasks, the open list, your tasks and last week's rows (type to search);
-`+ another task by id or URL` adds any other. Added rows stay with their week.
+`n` finds a task by part of its name or id (every word you type, in any order). Your pinned
+tasks, the open list, your tasks and last week's rows come first; `+ another task by id or URL`
+adds any other. Added rows stay with their week.
+
+ClickUp's API can't search tasks by name, so `n` and `g` search local copies of every task the
+app has come across: lists you opened, your tasks, pinned tasks, tasks you opened, timesheet
+rows and lookups (the 10,000 seen most recently). Nothing gathers the whole workspace. Typing an
+id, a custom id (`DEV-1042`, or just `1042` once a `DEV-` task has been seen) or a task URL also
+looks it up in ClickUp after a short pause, and keeps a copy for next time. Pickers list at most
+200 matches; keep typing to narrow them down.
 
 Adding and editing use the same form as `L`. Type the duration on top; below
 it are the day, the start, the end and a note. The end is calculated from the start and the
@@ -205,24 +216,23 @@ Time tracking needs ClickUp's *Time Tracking* ClickApp enabled in the workspace.
 
 ### Mouse
 
-Click a page tab to switch pages, a panel to focus it and a row to select it; double-click a task to open it, or a timesheet
-cell to add time to it. Click the `List` / `Mine` tab to switch, scroll with the wheel, and click an
-option in a popup to pick it.
+The mouse is always on. Click a page tab to switch pages, a panel to focus it and a row to select
+it; double-click a task to open it, or a timesheet cell to add time to it. Click the `List` /
+`Mine` tab to switch, scroll with the wheel, click an option in a popup to pick it, and click a
+link or image in the task panel to open it in the browser.
 
-Opening the task panel (`enter`, `0` or a click) also shows the task's activity between its
+To select text, hold Option (iTerm2, Apple Terminal) or Shift (most other terminals) while
+dragging. `y` copies any part of a task (id, URL, name, description, comments, status, estimate,
+a custom field, …) and `Y` its id.
+
+### Task activity
+
+Opening the task panel (`enter`, `0` or a double-click) also shows the task's activity between its
 comments, like ClickUp: who created it, the time people logged, when it moved to another status and
 when it was closed. ClickUp's API has no activity log, so this is pieced together from what it
 does offer. Status changes need ClickUp's *Time in Status* (paid plans), and don't say who made
 them; seeing everyone's logged time needs a workspace admin, otherwise you see your own. It isn't
 loaded for tasks you merely scroll past, to spare ClickUp's rate limit.
-
-In the task panel, click a property to copy it: the name, id, status, list, assignees, due date,
-tracked time or a custom field's value (it's underlined while the mouse is on it).
-
-While the app uses the mouse, the terminal can't select text, except with a key held down
-(Option in iTerm2 and Apple Terminal, Shift in most others). `M` turns the mouse off, so dragging
-selects text as usual; the tab bar shows *mouse off* until `M` turns it back on. The choice is
-remembered.
 
 ## Releases
 

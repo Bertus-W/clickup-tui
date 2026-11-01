@@ -4,7 +4,6 @@ package style
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -129,8 +128,8 @@ func Chip(label, color string) string {
 // ansi matches colour codes and OSC 8 hyperlinks (see Link).
 var ansi = regexp.MustCompile(`\x1b\[[0-9;]*m|\x1b\]8;[^\x1b\x07]*(?:\x1b\\|\x07)`)
 
-// Link makes text a hyperlink to url (OSC 8): gocui reports clicks on it, and terminals that
-// support it open it on cmd/ctrl-click.
+// Link makes text a hyperlink to url (OSC 8): terminals that support it open it on
+// cmd/ctrl-click.
 func Link(url, text string) string {
 	url = strings.Map(func(r rune) rune { // no control characters inside the escape code
 		if r < 0x20 || r == 0x7f {
@@ -139,24 +138,6 @@ func Link(url, text string) string {
 		return r
 	}, url)
 	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
-}
-
-// copyScheme marks a link that copies its value instead of opening it.
-const copyScheme = "cu-copy:"
-
-// Copyable makes shown a link that copies value when clicked (see Copied).
-func Copyable(value, shown string) string {
-	return Link(copyScheme+url.PathEscape(value), shown)
-}
-
-// Copied returns the value of a Copyable link, and whether link is one.
-func Copied(link string) (string, bool) {
-	rest, ok := strings.CutPrefix(link, copyScheme)
-	if !ok {
-		return "", false
-	}
-	value, err := url.PathUnescape(rest)
-	return value, err == nil
 }
 
 // Strip removes escape codes.
