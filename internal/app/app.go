@@ -74,8 +74,9 @@ type Prompt struct {
 	// Check validates the answer before the prompt closes: on an error the prompt stays
 	// open with the message, so a typo can be fixed instead of retyped.
 	Check func(answer string) error
-	// Complete, when set, is what tab does to the text typed so far.
-	Complete func(text string) string
+	// Suggest, when set, offers completions for the end of the text typed so far (e.g. the
+	// members for an @mention): picking names[i] replaces text[from:] with it and a space.
+	Suggest func(text string) (from int, names []string)
 }
 
 // UI is what the app needs from the terminal. Callbacks run on the UI goroutine and are
@@ -117,26 +118,26 @@ type App struct {
 	Debounce time.Duration // delay before fetching the highlighted task's details
 	TeamPref string
 
-	Me            clickup.User
-	Teams         []clickup.Team
-	TeamID        string
-	Hierarchy     []clickup.Space
-	View          View
-	LastList      *View
-	Tasks         []*clickup.Task
-	Pinned        []*clickup.Task // copies of their own, see pinned.go
-	PinnedSel     int
-	IncludeClosed bool
-	Filter        string
-	Group         render.GroupBy // how the task list is grouped
-	Loading       bool
-	SelectedID    string
-	Detail        *clickup.Task
-	Comments      []clickup.Comment // nil while loading
-	SyncedAt      time.Time
-	Log           []string
-	Sheet         Timesheet
-	Timer         *clickup.TimeEntry // the running timer, if any
+	Me         clickup.User
+	Teams      []clickup.Team
+	TeamID     string
+	Hierarchy  []clickup.Space
+	View       View
+	LastList   *View
+	Tasks      []*clickup.Task
+	Pinned     []*clickup.Task // copies of their own, see pinned.go
+	PinnedSel  int
+	Filter     string
+	Group      render.GroupBy // how the task list is grouped
+	Loading    bool
+	SelectedID string
+	visualFrom string // the task visual mode started at; "" when it's off
+	Detail     *clickup.Task
+	Comments   []clickup.Comment // nil while loading
+	SyncedAt   time.Time
+	Log        []string
+	Sheet      Timesheet
+	Timer      *clickup.TimeEntry // the running timer, if any
 
 	selIndex     int
 	pinnedAt     time.Time // when pinned tasks outside the list were last fetched
@@ -356,11 +357,12 @@ func (a *App) Lists() []Option {
 // --- task views ----------------------------------------------------------------------------
 
 func (a *App) viewKey() string {
-	return fmt.Sprintf("tasks:%s:%s:%s:%t", a.TeamID, a.View.Kind, a.View.ID, a.IncludeClosed)
+	return fmt.Sprintf("tasks:%s:%s:%s:false", a.TeamID, a.View.Kind, a.View.ID) // :false once meant "without closed tasks"
 }
 
 func (a *App) OpenView(v View) {
 	a.View = v
+	a.EndVisual()
 	if v.Kind == "list" {
 		a.LastList = &v
 		_ = cache.Put(a.Cache, "ui:list:"+a.TeamID, v)
@@ -372,7 +374,7 @@ func (a *App) OpenView(v View) {
 // LoadTasks renders the cached tasks of the current view at once, then refreshes them.
 // On a first visit pages stream in as they arrive.
 func (a *App) LoadTasks(quiet bool) {
-	view, closed, key, teamID, me := a.View, a.IncludeClosed, a.viewKey(), a.TeamID, a.Me.ID
+	view, key, teamID, me := a.View, a.viewKey(), a.TeamID, a.Me.ID
 	cached, _, hit := cache.Get[[]*clickup.Task](a.Cache, key)
 	// Snapshot now: once handed to the UI, the cached tasks are mutated on this goroutine.
 	cachedJSON, _ := json.Marshal(cached)
@@ -382,9 +384,9 @@ func (a *App) LoadTasks(quiet bool) {
 	a.Loading = !hit
 	touched := maps.Clone(a.touch) // tasks edited after this point keep their local state
 	a.run("tasks", func(ctx context.Context, apply func(func())) {
-		pages := a.API.ListTasks(ctx, view.ID, closed)
+		pages := a.API.ListTasks(ctx, view.ID, false)
 		if view.Kind == "my" {
-			pages = a.API.AssignedTasks(ctx, teamID, me, closed)
+			pages = a.API.AssignedTasks(ctx, teamID, me, false)
 		}
 		// The worker keeps its own copies: pointers handed to the UI get mutated there.
 		var values []clickup.Task
@@ -538,19 +540,18 @@ func (a *App) fixSelection() {
 	}
 	if i := a.SelectedIndex(); i >= 0 {
 		a.selIndex = i
-		return
+	} else {
+		a.Select(min(a.selIndex, len(rows)-1))
 	}
-	a.Select(min(a.selIndex, len(rows)-1))
+	a.keepVisual()
 }
 
 func (a *App) SetFilter(text string) {
+	if text != a.Filter {
+		a.EndVisual()
+	}
 	a.Filter = text
 	a.fixSelection()
-}
-
-func (a *App) ToggleClosed() {
-	a.IncludeClosed = !a.IncludeClosed
-	a.LoadTasks(false)
 }
 
 // SwitchTab flips between the last opened list and my tasks, like lazygit's [ and ].
@@ -671,6 +672,9 @@ func (a *App) current() *clickup.Task {
 	case a.Detail.Pending:
 		a.UI.Notify(Warn, "Task is still being created")
 		return nil
+	case a.Visual():
+		a.UI.Notify(Warn, "That works on one task · v or esc ends the selection")
+		return nil
 	}
 	return a.Detail
 }
@@ -692,12 +696,15 @@ func (a *App) Refresh() {
 	}
 }
 
-// AutoRefresh quietly reloads the current view when nothing else is happening.
-func (a *App) AutoRefresh() {
-	if a.TeamID != "" && !a.Busy() {
-		// The list load also updates pinned tasks that are in the list (syncPinned), and when it's
-		// done fetches the others if that's due.
-		a.pinnedDue = a.pinnedDue || a.Now().Sub(a.pinnedAt) >= pinnedEvery
-		a.LoadTasks(true)
+// AutoRefresh quietly reloads the current view when nothing else is happening, and reports
+// whether it did.
+func (a *App) AutoRefresh() bool {
+	if a.TeamID == "" || a.Busy() {
+		return false
 	}
+	// The list load also updates pinned tasks that are in the list (syncPinned), and when it's
+	// done fetches the others if that's due.
+	a.pinnedDue = a.pinnedDue || a.Now().Sub(a.pinnedAt) >= pinnedEvery
+	a.LoadTasks(true)
+	return true
 }

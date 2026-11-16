@@ -314,8 +314,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 			Parts []clickup.CommentPart `json:"comment"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		// Rich comments, the way ClickUp stores them: the parts in order with each mention's
-		// user filled in, and a comment_text that has the mentions at the end.
+		// Rich comments, the way ClickUp returns them: the parts in order, each mention as its
+		// "@Name" text without the user, and a comment_text that has the mentions at the end.
 		var mentions string
 		if body.Parts != nil {
 			body.Text = ""
@@ -331,6 +331,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		body.Text += mentions
 		s.Mentions = slices.Concat(s.Mentions, slices.DeleteFunc(slices.Clone(body.Parts), func(p clickup.CommentPart) bool { return p.Type != "tag" }))
+		for i, part := range body.Parts {
+			if part.Type == "tag" {
+				body.Parts[i] = clickup.CommentPart{Type: "tag", Text: part.Text}
+			}
+		}
 		id := r.PathValue("id")
 		c := clickup.Comment{ID: clickup.FlexString(fmt.Sprint(len(s.Comments[id]) + 1)), CommentText: body.Text, Parts: body.Parts, User: Me,
 			Date: clickup.FlexString(strconv.FormatInt(time.Now().UnixMilli(), 10))}

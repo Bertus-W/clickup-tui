@@ -100,6 +100,14 @@ func Color(value string, bg bool) (code string, ok bool) {
 }
 
 // Codes combines SGR codes (e.g. "1" bold and a Color) into one style.
+// Band gives a styled line a background (SGR codes, e.g. a grey band marking it selected)
+// under its own colours: the resets that end its spans would end the background too, so it's
+// set again after each.
+func Band(styled, bg string) string {
+	on := "\x1b[" + bg + "m"
+	return on + strings.ReplaceAll(styled, reset, reset+on) + reset
+}
+
 func Codes(codes ...string) Style { return sgr(strings.Join(codes, ";")) }
 
 // Contrast picks black or white text for a background colour.

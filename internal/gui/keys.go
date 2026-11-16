@@ -58,8 +58,16 @@ func (gui *Gui) keymap() []binding {
 		{taskViews, []any{'Y'}, "Copy ID", false, false, a((*app.App).CopyID)},
 
 		// Task list.
-		{[]string{viewTasks}, []any{gocui.KeyEsc}, "Clear filter", false, false, do(func() { gui.App.SetFilter("") })},
-		{[]string{viewTasks}, []any{'v'}, "Show closed", false, false, a((*app.App).ToggleClosed)},
+		{[]string{viewTasks}, []any{'v'}, "Select tasks (visual mode)", false, false, a((*app.App).ToggleVisual)},
+		{[]string{viewTasks}, []any{gocui.KeyShiftArrowDown}, "Select down", false, true, do(func() { gui.extendVisual(1) })},
+		{[]string{viewTasks}, []any{gocui.KeyShiftArrowUp}, "Select up", false, true, do(func() { gui.extendVisual(-1) })},
+		{[]string{viewTasks}, []any{gocui.KeyEsc}, "End selection / clear filter", false, false, do(func() {
+			if gui.App.Visual() {
+				gui.App.EndVisual()
+			} else {
+				gui.App.SetFilter("")
+			}
+		})},
 		{[]string{viewTasks}, []any{'S'}, "Sort by…", false, false, a((*app.App).SortMenu)},
 		{[]string{viewTasks}, []any{'[', ']'}, "Switch tab (list ↔ mine)", false, false, a((*app.App).SwitchTab)},
 		{[]string{viewTasks}, []any{'j', gocui.KeyArrowDown}, "Down", false, true, do(func() { gui.moveTask(1) })},
@@ -210,6 +218,7 @@ func keyName(key any) string {
 			gocui.KeySpace: "space", gocui.KeyEnter: "enter", gocui.KeyEsc: "esc", gocui.KeyTab: "tab",
 			gocui.KeyBacktab: "shift+tab", gocui.KeyArrowUp: "↑", gocui.KeyArrowDown: "↓",
 			gocui.KeyArrowLeft: "←", gocui.KeyArrowRight: "→", gocui.KeyPgup: "pgup", gocui.KeyPgdn: "pgdn",
+			gocui.KeyShiftArrowUp: "shift+↑", gocui.KeyShiftArrowDown: "shift+↓",
 			gocui.KeyHome: "home", gocui.KeyEnd: "end", gocui.KeyCtrlP: "ctrl+p", gocui.KeyCtrlD: "ctrl+d",
 			gocui.KeyCtrlU: "ctrl+u", gocui.KeyCtrlC: "ctrl+c", gocui.KeyCtrlJ: "ctrl+j", gocui.KeyCtrlK: "ctrl+k",
 		}[k]; ok {
@@ -289,6 +298,14 @@ func (gui *Gui) pageSize(view string) int {
 
 func (gui *Gui) moveTask(delta int) {
 	gui.App.Select(max(gui.App.SelectedIndex(), 0) + delta)
+}
+
+// extendVisual is shift+↑↓: it starts visual mode if it's off, then moves.
+func (gui *Gui) extendVisual(delta int) {
+	if !gui.App.Visual() {
+		gui.App.ToggleVisual()
+	}
+	gui.moveTask(delta)
 }
 
 func (gui *Gui) scrollDetail(delta int) { gui.scroll(viewDetail, delta) }

@@ -286,7 +286,7 @@ func TestAssignPicksSeveral(t *testing.T) {
 func TestKeybindingsMenuRunsActions(t *testing.T) {
 	h := newHarness(t, fake.Basic(5))
 	h.press('?')
-	h.wantScreen("Keybindings", "space   Status", "Log time", "Assign/unassign me", "Timesheet page")
+	h.wantScreen("Keybindings", "space    Status", "Log time", "Assign/unassign me", "Timesheet page")
 	if strings.Contains(h.screen(), "Tasks page") {
 		t.Error("the menu offers the page you're on")
 	}
@@ -817,21 +817,57 @@ func TestFormErrorShowsInTheForm(t *testing.T) {
 	}
 }
 
-// tab completes an @mention in a comment.
+// Typing @ in a comment lists the members to mention; tab or enter inserts the chosen one,
+// esc closes the list without losing the comment.
 func TestCommentMentionCompletes(t *testing.T) {
 	h := newHarness(t, fake.Basic(5))
 	h.press('c')
 	h.typeText("hi @al")
+	h.wantScreen("@alice", "tab/enter: insert")
 	h.press(gocui.KeyTab)
 	if got := h.gui.inputText(); got != "hi @alice " {
 		t.Fatalf("input = %q", got)
 	}
+	h.typeText("and @al")
+	h.press(gocui.KeyEsc)
+	if h.gui.popup == nil || len(h.gui.popup.suggest) != 0 {
+		t.Fatal("esc closed the comment instead of the suggestions")
+	}
+	h.typeText("i")
+	h.press(enter) // picks the suggestion
+	if got := h.gui.inputText(); got != "hi @alice and @alice " {
+		t.Fatalf("input = %q", got)
+	}
 	h.typeText("look")
 	h.press(enter)
-	h.wantScreen("@alice look", "Comment posted on DEV-1")
-	if len(h.fake.Mentions) != 1 {
+	h.wantScreen("@alice and @alice look", "Comment posted on DEV-1")
+	if len(h.fake.Mentions) != 2 {
 		t.Fatalf("mentions = %+v", h.fake.Mentions)
 	}
+}
+
+// v starts a selection that moving extends; Y copies the IDs; esc ends it before it clears
+// the filter. Shift+↓ starts one too.
+func TestVisualMode(t *testing.T) {
+	h := newHarness(t, fake.Basic(5))
+	var copied string
+	h.gui.clipboard = func(text string) error { copied = text; return nil }
+	h.press('v', 'j')
+	h.wantScreen("-- VISUAL -- 2 selected")
+	if strings.Contains(h.screen(), "[1;36m") {
+		t.Fatal("the title shows raw colour codes")
+	}
+	h.press(gocui.KeyEsc)
+	if h.app.Visual() {
+		t.Fatal("esc didn't end visual mode")
+	}
+	h.press(gocui.KeyShiftArrowDown)
+	h.wantScreen("-- VISUAL -- 2 selected")
+	h.press('Y')
+	if copied != "DEV-3\nDEV-5" || h.app.Visual() {
+		t.Fatalf("copied %q, visual %v", copied, h.app.Visual())
+	}
+	h.wantScreen("Copied IDs of 2 tasks")
 }
 
 // S sorts the list; a heading shows each group and how many tasks it has.
@@ -880,7 +916,8 @@ func TestCopyMenuAndCopyID(t *testing.T) {
 	}
 }
 
-// No periodic refresh while the terminal window isn't focused; coming back refreshes once.
+// No periodic refresh while the terminal window isn't focused; coming back reloads the list,
+// unless it was reloaded seconds ago.
 func TestNoRefreshWhileUnfocused(t *testing.T) {
 	h := newHarness(t, fake.Basic(5))
 	lists := func() int { return h.fake.Count("GET /api/v2/team/T1/task") }
@@ -895,9 +932,15 @@ func TestNoRefreshWhileUnfocused(t *testing.T) {
 		t.Fatalf("%d refreshes coming back, want 1", lists()-n)
 	}
 	h.event(func() { _ = h.gui.onFocus(false) })
-	h.event(func() { _ = h.gui.onFocus(true) }) // back within a minute: nothing to catch up
+	h.event(func() { _ = h.gui.onFocus(true) }) // back within seconds: no second reload
 	if lists() != n+1 {
 		t.Fatalf("%d refreshes, want 1", lists()-n)
+	}
+	h.gui.refreshedAt = h.gui.refreshedAt.Add(-focusRefreshGap) // later on
+	h.event(func() { _ = h.gui.onFocus(false) })
+	h.event(func() { _ = h.gui.onFocus(true) })
+	if lists() != n+2 {
+		t.Fatalf("%d refreshes, want 2", lists()-n)
 	}
 }
 

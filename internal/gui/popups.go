@@ -40,6 +40,8 @@ type popup struct {
 	query     string
 	typing    bool // multi: the filter input has focus
 	prompt    app.Prompt
+	suggestAt int      // prompt: where the text the suggestions replace starts
+	suggest   []string // prompt: completions for the end of the text (Prompt.Suggest)
 	message   string
 	filled    bool   // the input view was prefilled
 	err       string // shown in red on the input's border until the next keystroke
@@ -125,6 +127,8 @@ func (p *popup) count() int {
 		return len(p.items)
 	case popupForm:
 		return len(p.form.Rows())
+	case popupPrompt:
+		return len(p.suggest)
 	}
 	return len(p.visible)
 }
@@ -148,18 +152,12 @@ func (gui *Gui) popupMove(delta int) {
 	}
 }
 
-// popupTab switches between a form's name and its properties, completes a prompt that can
-// (e.g. an @mention) and elsewhere moves down.
+// popupTab switches between a form's name and its properties, takes a prompt's selected
+// suggestion (e.g. an @mention) and elsewhere moves down.
 func (gui *Gui) popupTab() {
 	p := gui.popup
 	if p.kind == popupPrompt {
-		if v, err := gui.g.View(viewPopupInput); err == nil && p.prompt.Complete != nil {
-			if text := v.TextArea.GetContent(); p.prompt.Complete(text) != text {
-				v.TextArea.Clear()
-				v.TextArea.TypeString(p.prompt.Complete(text))
-				v.RenderTextArea()
-			}
-		}
+		gui.takeSuggestion()
 		return
 	}
 	if p.kind != popupForm {
@@ -168,6 +166,38 @@ func (gui *Gui) popupTab() {
 	}
 	p.err = ""
 	p.inList = !p.inList
+}
+
+// refreshSuggestions updates a prompt's suggestions for the text typed so far.
+func (p *popup) refreshSuggestions(text string) {
+	if p.kind != popupPrompt || p.prompt.Suggest == nil {
+		return
+	}
+	before := p.suggest
+	p.suggestAt, p.suggest = p.prompt.Suggest(text)
+	if !slices.Equal(before, p.suggest) {
+		p.sel = 0
+	}
+}
+
+// takeSuggestion replaces the end of a prompt's text with its selected suggestion. It
+// reports whether there was one to take.
+func (gui *Gui) takeSuggestion() bool {
+	p := gui.popup
+	v, err := gui.g.View(viewPopupInput)
+	if err != nil || p.kind != popupPrompt || p.sel >= len(p.suggest) {
+		return false
+	}
+	text := v.TextArea.GetContent()
+	if p.suggestAt >= len(text) {
+		return false
+	}
+	text = text[:p.suggestAt+1] + p.suggest[p.sel] + " "
+	v.TextArea.Clear()
+	v.TextArea.TypeString(text)
+	v.RenderTextArea()
+	p.refreshSuggestions(text)
+	return true
 }
 
 func (p *popup) move(delta int) {
@@ -304,7 +334,7 @@ func (gui *Gui) layoutPopup(maxX, maxY int) error {
 	}
 	lines := gui.popupLines(p)
 	hasInput := p.kind == popupPicker || p.kind == popupPrompt || p.kind == popupForm || (p.kind == popupMulti && p.typing)
-	hasList := p.kind != popupPrompt
+	hasList := p.kind != popupPrompt || len(p.suggest) > 0
 	// The title and the key hints share a border (the input's, or the list's when there's
 	// no input), so leave room for both.
 	hint := listHint(p)
@@ -409,6 +439,9 @@ func listHint(p *popup) string {
 	if p.kind == popupForm && p.form.ListHint != "" {
 		return p.form.ListHint
 	}
+	if p.kind == popupPrompt {
+		return "↑↓: choose · tab/enter: insert"
+	}
 	if p.kind == popupPicker && p.hidden > 0 {
 		return fmt.Sprintf("%d more · type to narrow · ↑↓: move · enter: select", p.hidden)
 	}
@@ -489,6 +522,12 @@ func (gui *Gui) popupLines(p *popup) []string {
 		return strings.Split(p.message, "\n")
 	case popupForm:
 		return formLines(p.form)
+	case popupPrompt:
+		lines := make([]string, len(p.suggest))
+		for i, name := range p.suggest {
+			lines[i] = style.BoldCyan("@" + name)
+		}
+		return lines
 	}
 	return nil
 }
@@ -527,6 +566,9 @@ func (gui *Gui) popupConfirm() (err error) {
 		gui.close()
 		p.onMulti(p.chosen)
 	case popupPrompt:
+		if gui.takeSuggestion() { // enter picks the suggestion; the next one submits
+			return nil
+		}
 		text := strings.TrimSpace(gui.inputText())
 		if check := p.prompt.Check; check != nil && (text != "" || p.prompt.AllowEmpty) {
 			if err := check(text); err != nil {
@@ -555,6 +597,10 @@ func (gui *Gui) popupCancel() error {
 			return nil
 		}
 		gui.returnTo = nil
+	}
+	if p := gui.popup; p.kind == popupPrompt && len(p.suggest) > 0 { // esc closes the suggestions first
+		p.suggest = nil
+		return nil
 	}
 	if p := gui.popup; p.kind == popupMulti && p.typing {
 		p.typing = false
@@ -621,6 +667,8 @@ func (gui *Gui) editPopupInput(v *gocui.View, key gocui.Key, ch rune, mod gocui.
 		}
 	case p.form != nil:
 		p.form.Name = v.TextArea.GetContent() // rows may depend on it, e.g. a calculated end time
+	case p.kind == popupPrompt:
+		p.refreshSuggestions(v.TextArea.GetContent())
 	}
 	return handled
 }

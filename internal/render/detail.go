@@ -121,7 +121,7 @@ func commentBlock(c clickup.Comment, marker string, width int) string {
 		header += " " + style.Yellow("sending…")
 	}
 	indent := strings.Repeat(" ", style.Width(marker))
-	text := Markdown(strings.TrimSpace(c.Text()), width-len(indent))
+	text := Markdown(strings.TrimSpace(c.Markdown()), width-len(indent))
 	if c.Formatted() { // written in ClickUp's editor: its formatting says more than markdown
 		text = Rich(c.Parts, width-len(indent))
 	}
@@ -222,6 +222,8 @@ func inline(line string) string {
 			return style.Code(" " + g("code") + " ")
 		case g("img") != "":
 			return style.Link(g("img"), style.LinkText("[image: "+cmp.Or(g("alt"), linkName(g("img")))+"]"))
+		case strings.HasPrefix(g("href"), "#user_mention#"): // [@Name](#user_mention#id)
+			return style.BoldCyan(g("text"))
 		case g("href") != "":
 			return style.Link(g("href"), style.LinkText(cmp.Or(g("text"), linkName(g("href")))))
 		case g("url") != "":

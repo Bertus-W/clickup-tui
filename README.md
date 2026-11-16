@@ -121,7 +121,7 @@ key in that list runs it.
 | `g` | go to a task: type part of its name or id (tasks the app has seen), or an id or URL |
 | `+` `_` | screen mode: normal → half → full |
 | `@` | toggle the command log |
-| `R` · `q` | refresh · quit |
+| `R` · `q` | refresh · quit. The list also reloads every minute, and when you switch back to the terminal window (in terminals that report focus) |
 
 **Tasks, Pinned and the task panel**
 
@@ -137,12 +137,13 @@ key in that list runs it.
 | `n` · `N` | new task · new subtask (see below) |
 | `r` · `e` | rename · edit the description in `$EDITOR` (it warns first: ClickUp's API takes descriptions as markdown, so saving loses the text colours and highlights set in ClickUp; leaving the editor without changes saves nothing) |
 | `m` | move to another list (type part of its name) |
-| `c` · `C` | comment · comment in `$EDITOR`. `@name` mentions someone; `tab` completes the name |
+| `c` · `C` | comment · comment in `$EDITOR`. `@name` mentions someone, in comments and descriptions: typing `@` lists the members (`↑↓`, then `tab`/`enter`); in `$EDITOR` a full name, a first name or the start of a name (3+ letters) that fits one member will do |
 | `L` | log time (see [Logging time](#logging-time)) |
 | `T` · `w` | start or stop a timer · the task's time entries (pick one to edit or delete it, `+` logs more) |
 | `P` | pin / unpin |
 | `d` · `o` · `y` · `Y` | delete (asks first) · open in the browser · copy a part of the task: id, URL, name, markdown link, description, comments, status, list, assignees, tags, priority, due date, estimate, tracked time, start date, points, watchers, checklists, attachment URLs or a custom field · copy the id |
-| `/` · `v` · `S` | filter by name, id, status, assignee, tag or dropdown value · show closed tasks · sort by status, assignee, priority or due date (Tasks) |
+| `/` · `S` | filter by name, id, status, assignee, tag or dropdown value · sort by status, assignee, priority or due date (Tasks) |
+| `v` · `shift+↑↓` | select several tasks, vim-style: `v` starts at the highlighted task and moving extends the selection; `y` copies their IDs, URLs, names or markdown links (a task per line), `Y` their IDs. `v` or `esc` ends it (Tasks) |
 
 **Lists:** `enter` opens a list, `space` expands or collapses, `/` searches all lists.
 **Workspace:** `enter` switches workspace.

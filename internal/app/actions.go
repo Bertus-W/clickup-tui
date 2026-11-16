@@ -291,10 +291,12 @@ func (a *App) EditDescription() {
 	}
 	// Warn before editing: ClickUp's API only takes descriptions as markdown, so saving replaces
 	// the description and drops what markdown can't hold (text colours, highlights).
-	current := t.Body()
+	// Mentions read "@Name" in the editor; saving turns them back into mentions.
+	current := plainMentions(t.Body())
 	a.UI.Confirm("Edit description?", "Saving replaces the description in ClickUp with markdown: "+
 		"text colours and highlights set in ClickUp will be lost.\n\n"+
-		"To keep it as it is, leave the editor without changes.",
+		"To keep it as it is, leave the editor without changes.\n\n"+
+		"@name mentions someone: a full name, a first name or the start of a name will do.",
 		func() {
 			a.UI.Edit("Description · "+t.Label(), current, func(edited string) {
 				// Unchanged means no request. Editors that save Windows line endings or a byte
@@ -303,10 +305,32 @@ func (a *App) EditDescription() {
 				if strings.TrimSpace(edited) == strings.TrimSpace(editorText(current)) {
 					return
 				}
-				a.update(t, "Description updated", func(t *clickup.Task) { t.MarkdownDescription = edited },
-					map[string]any{"markdown_content": edited})
+				md, mentioned, unknown := mentionMarkdown(edited, a.Members())
+				a.warnUnknownMentions(unknown)
+				a.update(t, strings.TrimSpace("Description updated "+mentionNames(mentioned)), func(t *clickup.Task) { t.MarkdownDescription = md },
+					map[string]any{"markdown_content": md})
 			})
 		})
+}
+
+func (a *App) suggestMention(text string) (int, []string) {
+	return mentionSuggestions(text, a.Members())
+}
+
+func mentionNames(users []clickup.User) string {
+	names := make([]string, len(users))
+	for i, u := range users {
+		names[i] = "@" + u.Username
+	}
+	return strings.Join(slices.Compact(names), " ")
+}
+
+// warnUnknownMentions points out @words that mention nobody: a typo, or a name more than one
+// member starts with.
+func (a *App) warnUnknownMentions(unknown []string) {
+	if len(unknown) > 0 {
+		a.UI.Notify(Warn, "Not a mention (no single member by that name): "+strings.Join(slices.Compact(unknown), " "))
+	}
 }
 
 // editorText undoes what editors add to a file without anyone typing it: Windows line endings
@@ -525,8 +549,7 @@ func (a *App) Delete() {
 // Comment adds a one-line comment; CommentInEditor opens $EDITOR for longer ones.
 func (a *App) Comment() {
 	if t := a.current(); t != nil {
-		complete := func(text string) string { return completeMention(text, a.Members()) }
-		a.UI.Prompt(Prompt{Title: "Comment on " + t.Label(), Hint: "@name + tab mentions someone · C: multi-line in $EDITOR", Complete: complete},
+		a.UI.Prompt(Prompt{Title: "Comment on " + t.Label(), Hint: "@name mentions someone · C: multi-line in $EDITOR", Suggest: a.suggestMention},
 			func(text string) { a.postComment(t, text) })
 	}
 }
@@ -546,6 +569,10 @@ func (a *App) postComment(t *clickup.Task, text string) {
 		ID: "pending", CommentText: text, User: a.Me, Pending: true,
 		Date: clickup.FlexString(strconv.FormatInt(a.Now().UnixMilli(), 10)),
 	}
+	parts, mentioned, unknown := mentionParts(text, a.Members())
+	if len(mentioned) > 0 {
+		pending.Parts = parts // the mentions show in full while it's sent
+	}
 	id := t.ID
 	shown := func() bool { return a.Detail != nil && a.Detail.ID == id } // objects get replaced on reload
 	if shown() {
@@ -553,12 +580,8 @@ func (a *App) postComment(t *clickup.Task, text string) {
 		a.UI.ShowLatestComment()
 	}
 	label := t.Label()
-	parts, mentioned := mentionParts(text, a.Members())
-	names := make([]string, len(mentioned))
-	for i, u := range mentioned {
-		names[i] = "@" + u.Username
-	}
-	a.log(strings.TrimSpace("Comment on " + label + " " + strings.Join(names, " ")))
+	a.log(strings.TrimSpace("Comment on " + label + " " + mentionNames(mentioned)))
+	a.warnUnknownMentions(unknown)
 	a.run("", func(ctx context.Context, apply func(func())) {
 		err := a.API.CreateComment(ctx, id, text, parts)
 		var fresh []clickup.Comment
@@ -618,6 +641,10 @@ func (a *App) GoTo() {
 // CopyMenu offers every part of the task for the clipboard: ids, name, links, description,
 // properties, custom fields and the comments. Parts the task doesn't have are left out.
 func (a *App) CopyMenu() {
+	if a.Visual() {
+		a.copySelected()
+		return
+	}
 	t := a.current()
 	if t == nil {
 		return
@@ -707,6 +734,14 @@ func (a *App) CopyMenu() {
 
 // CopyID copies the id people quote (the custom id when the workspace has them) in one key.
 func (a *App) CopyID() {
+	if tasks := a.Selected(); tasks != nil {
+		ids := make([]string, len(tasks))
+		for i, t := range tasks {
+			ids[i] = t.Label()
+		}
+		a.copyLines(strings.Join(ids, "\n"), len(tasks), "IDs")
+		return
+	}
 	if t := a.current(); t != nil {
 		a.copy(t.Label())
 	}

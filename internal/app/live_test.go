@@ -10,7 +10,7 @@ import (
 )
 
 // TestLiveMoveAndMention checks the two calls the fake can't vouch for against the real
-// ClickUp API: moving a task (API v3) and a comment with an @mention. It runs only with
+// ClickUp API: moving a task (API v3), and a comment and a description with an @mention. It runs only with
 // CU_LIVE=1, uses your config, and works on a throwaway task in the "clickup-tui demo" list
 // (cu seed makes it) that it deletes afterwards.
 //
@@ -77,11 +77,20 @@ func TestLiveMoveAndMention(t *testing.T) {
 	check(api.MoveTask(ctx, teamID, task.ID, from.ID))
 
 	text := "live check: hi @" + me.Username + " (throwaway)"
-	parts, _ := mentionParts(text, []clickup.User{me})
+	parts, _, _ := mentionParts(text, []clickup.User{me})
 	check(api.CreateComment(ctx, task.ID, text, parts))
 	comments, err := api.Comments(ctx, task.ID)
 	check(err)
 	if len(comments) != 1 || comments[0].Text() != text {
 		t.Errorf("comment reads %q, want %q", comments[0].Text(), text)
+	}
+
+	md, _, _ := mentionMarkdown(text, []clickup.User{me})
+	_, err = api.UpdateTask(ctx, task.ID, map[string]any{"markdown_content": md})
+	check(err)
+	described, err := api.GetTask(ctx, task.ID, "")
+	check(err)
+	if described.MarkdownDescription != md || plainMentions(described.MarkdownDescription) != text {
+		t.Errorf("description reads %q, want %q", described.MarkdownDescription, md)
 	}
 }

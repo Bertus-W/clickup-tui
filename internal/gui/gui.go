@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jesseduffield/gocui"
@@ -95,8 +96,9 @@ type Gui struct {
 	toastUntil time.Time
 	spin       int
 
-	unfocused   bool      // the terminal window lost focus: no periodic refresh
-	refreshedAt time.Time // the last periodic refresh
+	unfocused   bool        // the terminal window lost focus: no periodic refresh
+	refreshedAt time.Time   // the last periodic refresh
+	refreshDue  atomic.Bool // back in focus: refresh as soon as nothing else is loading
 
 	// editor opens text in $EDITOR, browser opens a URL, clipboard copies; tests replace them.
 	editor    func(initial string) (string, bool, error)
@@ -120,6 +122,9 @@ func New(opts Options) (*Gui, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if !opts.Headless {
+		gocui.Screen = guardEscapes(gocui.Screen) // gocui reads its events from here
 	}
 	gui := &Gui{g: g, panel: viewTasks, lastList: viewTasks, showLog: true, expanded: map[string]bool{}}
 	gui.editor, gui.browser, gui.clipboard = gui.runEditor, openURL, copyToClipboard
@@ -177,6 +182,8 @@ func (gui *Gui) ticker() {
 		case <-spin.C:
 			if gui.App.Busy() {
 				gui.async.UI(func() { gui.spin++ })
+			} else if gui.refreshDue.Load() {
+				gui.async.UI(gui.autoRefresh)
 			}
 		case <-refresh.C:
 			gui.async.UI(gui.autoRefresh)
@@ -187,17 +194,23 @@ func (gui *Gui) ticker() {
 // autoRefresh is the periodic refresh: skipped while a popup is open or the terminal window
 // isn't focused (nobody's looking, so it would only spend ClickUp's rate limit).
 func (gui *Gui) autoRefresh() {
-	if gui.popup == nil && !gui.unfocused {
+	if gui.popup == nil && !gui.unfocused && gui.App.AutoRefresh() {
 		gui.refreshedAt = time.Now()
-		gui.App.AutoRefresh()
+		gui.refreshDue.Store(false)
 	}
 }
 
-// onFocus follows the terminal window's focus; coming back, it refreshes if that's overdue.
-// Terminals that don't report focus never call it, and keep refreshing as usual.
+// focusRefreshGap is how soon after a refresh coming back to the window skips another:
+// switching back and forth shouldn't reload the list every time.
+const focusRefreshGap = 5 * time.Second
+
+// onFocus follows the terminal window's focus. Coming back reloads the list (a change made in
+// the browser shows right away), once nothing else is loading and no popup is open.
+// Terminals that don't report focus never call it, and keep refreshing every minute.
 func (gui *Gui) onFocus(focused bool) error {
 	gui.unfocused = !focused
-	if focused && time.Since(gui.refreshedAt) >= time.Minute {
+	if focused && time.Since(gui.refreshedAt) >= focusRefreshGap {
+		gui.refreshDue.Store(true)
 		gui.autoRefresh()
 	}
 	return nil
@@ -493,8 +506,10 @@ func (gui *Gui) renderTasks() {
 		v.TabIndex = 1
 	}
 	var sub []string
-	if a.IncludeClosed {
-		sub = append(sub, "+closed")
+	lo, hi, visual := a.VisualRange()
+	if visual {
+		// A border shows plain text: no styling here.
+		sub = append(sub, fmt.Sprintf("-- VISUAL -- %d selected · y: copy · Y: copy IDs · v/esc: end", hi-lo+1))
 	}
 	if a.Filter != "" {
 		sub = append(sub, "filter: "+a.Filter)
@@ -523,7 +538,11 @@ func (gui *Gui) renderTasks() {
 			gui.taskLines = append(gui.taskLines, -1)
 		}
 		lineOf[i] = len(lines)
-		lines = append(lines, table.Line(r, now))
+		line := table.Line(r, now)
+		if visual && i >= lo && i <= hi {
+			line = style.Band(line, "48;2;52;55;61")
+		}
+		lines = append(lines, line)
 		gui.taskLines = append(gui.taskLines, i)
 	}
 	if len(rows) == 0 {
@@ -676,6 +695,9 @@ func (gui *Gui) Focus(p app.Panel) {
 func (gui *Gui) focus(name string) {
 	gui.panel = name
 	gui.filtering = false
+	if name != viewTasks && gui.App != nil {
+		gui.App.EndVisual() // the selection is the task list's
+	}
 	switch name {
 	case viewTasks:
 		gui.lastList = name

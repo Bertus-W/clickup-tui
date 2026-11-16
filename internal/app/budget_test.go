@@ -67,7 +67,7 @@ func TestRequestBudget(t *testing.T) {
 	}
 	mark = len(srv.Requests)
 	for range 5 {
-		h.do((*app.App).AutoRefresh)
+		h.do(func(a *app.App) { a.AutoRefresh() })
 	}
 	n, detail = requests(srv, mark)
 	t.Logf("five minutes idle with 3 pinned: %d requests\n%s", n, detail)

@@ -33,3 +33,11 @@ func TestCellFit(t *testing.T) {
 		t.Errorf("padded width = %d", got)
 	}
 }
+
+// A band keeps the line's colours and covers it to the end, past every reset.
+func TestBand(t *testing.T) {
+	got := Band(Red("a")+" b", "48;5;1")
+	if want := "\x1b[48;5;1m\x1b[31ma\x1b[0m\x1b[48;5;1m b\x1b[0m"; got != want {
+		t.Fatalf("band = %q, want %q", got, want)
+	}
+}

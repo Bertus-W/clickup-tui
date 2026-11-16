@@ -442,16 +442,13 @@ func TestGoToLooksUpTypedIDs(t *testing.T) {
 	}
 }
 
-func TestToggleClosedAndAssignMe(t *testing.T) {
+// Closed tasks aren't listed.
+func TestClosedHiddenAndAssignMe(t *testing.T) {
 	srv := fake.Basic(5)
 	srv.Tasks["t3"].Status = fake.Statuses[2]
 	h := newHarness(t, srv, nil).boot()
 	if n := len(h.rows()); n != 2 {
 		t.Fatalf("%d rows", n)
-	}
-	h.do((*app.App).ToggleClosed)
-	if n := len(h.rows()); n != 3 {
-		t.Fatalf("%d rows with closed", n)
 	}
 	h.do((*app.App).AssignMe) // t1 is assigned to me: unassign
 	if a := h.fake.Task("t1").Assignees; len(a) != 0 {
@@ -563,6 +560,35 @@ func TestCopyMenu(t *testing.T) {
 	h.do((*app.App).CopyMenu, 'd') // the whole description, as markdown
 	if want := "Description of **task 1**"; h.ui.clipboard != want {
 		t.Fatalf("clipboard = %q", h.ui.clipboard)
+	}
+}
+
+// v selects a range of tasks, in either direction; y and Y copy from all of them, a task per
+// line, and end the selection. One-task actions refuse while it's on.
+func TestVisualSelection(t *testing.T) {
+	h := newHarness(t, fake.Basic(5), nil).boot()
+	rows := h.rows()
+	h.do(func(a *app.App) { a.Select(2); a.ToggleVisual(); a.Select(1) }) // upwards
+	if got := len(h.app.Selected()); got != 2 {
+		t.Fatalf("%d selected", got)
+	}
+	h.do((*app.App).Rename) // no prompt: it works on one task
+	if note := h.ui.notes[len(h.ui.notes)-1]; !strings.Contains(note, "one task") {
+		t.Fatalf("note = %q", note)
+	}
+	h.do((*app.App).CopyID)
+	if want := h.app.Rows()[1].Task.Label() + "\n" + h.app.Rows()[2].Task.Label(); h.ui.clipboard != want || h.app.Visual() {
+		t.Fatalf("clipboard = %q (want %q), visual %v", h.ui.clipboard, want, h.app.Visual())
+	}
+	h.do(func(a *app.App) { a.Select(0); a.ToggleVisual(); a.Select(len(rows) - 1) })
+	h.do((*app.App).CopyMenu, 'l')
+	if lines := strings.Split(h.ui.clipboard, "\n"); len(lines) != len(rows) || !strings.HasSuffix(lines[0], " "+rows[0]) {
+		t.Fatalf("clipboard = %q", h.ui.clipboard)
+	}
+	// Filtering ends it: the range would hide tasks.
+	h.do(func(a *app.App) { a.ToggleVisual(); a.SetFilter("1") })
+	if h.app.Visual() {
+		t.Fatal("still visual after filtering")
 	}
 }
 
@@ -1176,7 +1202,7 @@ func TestPinnedRefreshIsFrugal(t *testing.T) {
 	srv.Tasks["t1"].DateUpdated = "1800000000000"
 	count := func() (t1, t5 int) { return srv.Count("GET /api/v2/task/t1"), srv.Count("GET /api/v2/task/t5") }
 	t1, t5 := count()
-	h.do((*app.App).AutoRefresh)
+	h.do(func(a *app.App) { a.AutoRefresh() })
 	if n1, _ := count(); n1 != t1 {
 		t.Error("fetched the pinned task that's in the list on its own")
 	}
@@ -1188,13 +1214,13 @@ func TestPinnedRefreshIsFrugal(t *testing.T) {
 	}
 	for range 4 { // the next minutes: nothing for it
 		clock = clock.Add(time.Minute)
-		h.do((*app.App).AutoRefresh)
+		h.do(func(a *app.App) { a.AutoRefresh() })
 	}
 	if _, n5 := count(); n5 != t5+1 {
 		t.Errorf("fetched again within five minutes: %d", n5-t5)
 	}
 	clock = clock.Add(time.Minute)
-	h.do((*app.App).AutoRefresh)
+	h.do(func(a *app.App) { a.AutoRefresh() })
 	if _, n5 := count(); n5 != t5+2 {
 		t.Errorf("not fetched after five minutes: %d", n5-t5)
 	}
@@ -1222,6 +1248,24 @@ func TestUnchangedDescriptionIsNotSaved(t *testing.T) {
 	h.do((*app.App).EditDescription, true, "Line one\r\n\r\n- a new point\r\n")
 	if puts() != 1 || srv.Task("t1").MarkdownDescription != "Line one\n\n- a new point\n" {
 		t.Fatalf("%d updates, description %q", puts(), srv.Task("t1").MarkdownDescription)
+	}
+}
+
+// @mentions in a description are saved as ClickUp's mention links, and read as @name again
+// in the editor. An @word that names nobody is pointed out.
+func TestDescriptionMentions(t *testing.T) {
+	srv := fake.Basic(3)
+	h := newHarness(t, srv, nil).boot()
+	h.do((*app.App).EditDescription, true, "Ask @ali (or @nobody)")
+	if got := srv.Task("t1").MarkdownDescription; got != "Ask [@alice](#user_mention#7) (or @nobody)" {
+		t.Fatalf("description = %q", got)
+	}
+	if note := h.ui.notes[len(h.ui.notes)-1]; !strings.Contains(note, "@nobody") || strings.Contains(note, "alice") {
+		t.Fatalf("note = %q", note)
+	}
+	h.do((*app.App).EditDescription, true, "Ask @alice (or @nobody)") // unchanged: no update
+	if h.ui.editorText != "Ask @alice (or @nobody)" || srv.Count("PUT /api/v2/task/t1") != 1 {
+		t.Fatalf("editor showed %q, %d updates", h.ui.editorText, srv.Count("PUT /api/v2/task/t1"))
 	}
 }
 

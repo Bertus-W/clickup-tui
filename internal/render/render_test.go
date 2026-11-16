@@ -98,6 +98,29 @@ func TestMarkdownSubset(t *testing.T) {
 	}
 }
 
+// A mention reads as the name, not as a link.
+func TestMarkdownMention(t *testing.T) {
+	if out := style.Strip(Markdown("ask [@Bertus Wisman](#user_mention#1)", 80)); out != "ask @Bertus Wisman\n" {
+		t.Fatalf("markdown = %q", out)
+	}
+}
+
+// A comment's mention of a name with spaces is highlighted in full.
+func TestCommentMentionInFull(t *testing.T) {
+	c := clickup.Comment{Parts: []clickup.CommentPart{
+		{Text: "hi "}, {Type: "tag", Text: "@Bertus Wisman", User: &clickup.CommentUser{ID: 1}}, {Text: " look"},
+	}}
+	out := Markdown(c.Markdown(), 80)
+	if !strings.Contains(out, style.BoldCyan("@Bertus Wisman")) || style.Strip(out) != "hi @Bertus Wisman look\n" {
+		t.Fatalf("markdown = %q", out)
+	}
+	// As the API returns it: the mention's text without its user.
+	c.Parts[1].User = nil
+	if out := Markdown(c.Markdown(), 80); !strings.Contains(out, style.BoldCyan("@Bertus Wisman")) {
+		t.Fatalf("markdown = %q", out)
+	}
+}
+
 func TestMarkdownBlocksAndSpans(t *testing.T) {
 	md := "- [ ] open item\n- [x] done item\n1. first\n> quoted\n---\n" +
 		"see [the docs](https://example.com/docs) or https://x.test/a, *soft* and _also_, ~~gone~~, ask @alice\n" +

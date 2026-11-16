@@ -3,7 +3,9 @@ package clickup
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -295,16 +297,34 @@ func (c Comment) Formatted() bool {
 // posting, ClickUp may not have resolved a mention yet (a bare {"type":"tag"}): then the
 // comment_text is all there is.
 func (c Comment) Text() string {
+	return c.text(func(_ int64, text string) string { return text })
+}
+
+// Markdown is Text with each mention as ClickUp's markdown for it, [@Name](#user_mention#id),
+// so it can be shown in full: "@Bertus Wisman", not just "@Bertus".
+func (c Comment) Markdown() string {
+	return c.text(func(id int64, text string) string {
+		return fmt.Sprintf("[%s](#user_mention#%d)", strings.NewReplacer("[", "", "]", "").Replace(text), id)
+	})
+}
+
+// text builds the comment from its parts with mention writing each mention. ClickUp returns a
+// mention as its text without the user ({"type":"tag","text":"@Name"}): then id is 0.
+func (c Comment) text(mention func(id int64, text string) string) string {
 	if !slices.ContainsFunc(c.Parts, func(p CommentPart) bool { return p.Type == "tag" }) ||
 		slices.ContainsFunc(c.Parts, func(p CommentPart) bool { return p.Type == "tag" && p.Text == "" && p.User == nil }) {
 		return c.CommentText
 	}
 	var b strings.Builder
 	for _, p := range c.Parts {
-		if p.Type == "tag" && p.Text == "" && p.User != nil {
-			p.Text = "@" + p.User.Username
+		switch {
+		case p.Type == "tag" && p.User != nil:
+			b.WriteString(mention(p.User.ID, cmp.Or(p.Text, "@"+p.User.Username)))
+		case p.Type == "tag":
+			b.WriteString(mention(0, p.Text))
+		default:
+			b.WriteString(p.Text)
 		}
-		b.WriteString(p.Text)
 	}
 	return b.String()
 }
